@@ -128,6 +128,7 @@ negative_view(tensor(1))""")
         self.assertEqual(base.grad, torch.tensor(-1.0))
 
     # autograd custom functions with views don't work
+    # tracked in https://github.com/pytorch/pytorch/issues/73604
     @unittest.expectedFailure
     def test_view_backward(self):
         base = torch.tensor(1.0, requires_grad=True)
