@@ -45,7 +45,7 @@ class NegativeTensor(Tensor):
         # official API.  I am thinking that something that does the
         # assert above and this call could be made into a utility function
         # that is in the public API
-        return torch.Tensor._make_subclass(cls, elem)
+        return Tensor._make_subclass(cls, elem)
 
     def __repr__(self):
         with no_dispatch():
