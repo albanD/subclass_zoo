@@ -4,17 +4,9 @@ from torch.autograd import Function
 from torch.utils._pytree import tree_map
 from torch.testing._internal.common_utils import TestCase, run_tests
 
-import contextlib
+from utils import no_dispatch
+
 import unittest
-
-
-@contextlib.contextmanager
-def no_dispatch():
-    guard = torch._C._DisableTorchDispatch()
-    try:
-        yield
-    finally:
-        del guard
 
 
 # This is a reimplementation of "negative tensor views" as currently
