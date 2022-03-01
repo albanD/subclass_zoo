@@ -17,6 +17,11 @@ def no_dispatch():
         del guard
 
 
+# This is a reimplementation of "negative tensor views" as currently
+# implemented in PyTorch core.  This lets you represent a negation
+# without actually materializing the negated value, so it can be fused
+# with further operations.  See also the PR that added this to PyTorch:
+# https://github.com/pytorch/pytorch/pull/56058
 class NegativeTensor(Tensor):
     @staticmethod
     def __new__(cls, elem):
