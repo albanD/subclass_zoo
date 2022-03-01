@@ -20,6 +20,7 @@ class NegativeTensor(Tensor):
         # At the moment, this class is not compositional, so we assert
         # that the tensor we're wrapping is exactly a Tensor
         assert type(elem) is Tensor
+
         # Calling _make_subclass directly in an autograd context is
         # never the right thing to do, as this will detach you from
         # the autograd graph.  You must create an autograd function
@@ -27,6 +28,23 @@ class NegativeTensor(Tensor):
         # and call that instead.  This assert helps prevent direct usage
         # (which is bad!)
         assert not elem.requires_grad or not torch.is_grad_enabled()
+
+        # There is something very subtle going on here.  In particular,
+        # suppose that elem is a view.  Does all of the view metadata
+        # (sizes, strides, storages) get propagated correctly?  Yes!
+        # Internally, the way _make_subclass works is it creates an
+        # alias (using Tensor.alias) of the original tensor, which
+        # means we replicate storage/strides, but with the Python object
+        # as an instance of your subclass.  In other words,
+        # _make_subclass is the "easy" case of metadata propagation,
+        # because anything that alias() propagates, you will get in
+        # your subclass.  It is _make_wrapper_subclass which is
+        # problematic...
+        #
+        # TODO: We need to think about how we want to turn this into
+        # official API.  I am thinking that something that does the
+        # assert above and this call could be made into a utility function
+        # that is in the public API
         return torch.Tensor._make_subclass(cls, elem)
 
     def __repr__(self):
@@ -126,6 +144,17 @@ negative_view(tensor(1))""")
         x = negative_view(base)
         x.sum().backward()
         self.assertEqual(base.grad, torch.tensor(-1.0))
+
+    def test_negative_view_of_view(self):
+        base = torch.zeros(2, 2)
+        view = base[0]
+        neg_view = negative_view(view)
+        self.assertEqual(neg_view, torch.zeros(2))
+        base[0, 0].add_(1)
+        base[0, 1].add_(2)
+        base[1, 0].add_(3)
+        base[1, 1].add_(4)
+        self.assertEqual(neg_view, torch.tensor([-1.0, -2.0]))
 
     # autograd custom functions with views don't work
     # tracked in https://github.com/pytorch/pytorch/issues/73604
