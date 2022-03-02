@@ -21,6 +21,8 @@ class NegativeTensor(Tensor):
         # that the tensor we're wrapping is exactly a Tensor
         assert type(elem) is Tensor
 
+        # Note [Passing requires_grad=true tensors to subclasses]
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         # Calling _make_subclass directly in an autograd context is
         # never the right thing to do, as this will detach you from
         # the autograd graph.  You must create an autograd function
