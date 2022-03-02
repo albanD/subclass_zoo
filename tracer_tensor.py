@@ -1,11 +1,11 @@
 import torch
 from torch import Tensor
-from torch.fx import Tracer
+# from torch.fx import Tracer
 from torch.fx.passes.shape_prop import _extract_tensor_metadata
 from torch.utils._pytree import tree_map
+from torch.testing._internal.common_utils import TestCase, run_tests
 
-from utils import no_dispatch, tree_map2
-from typing import Any
+from utils import no_dispatch
 
 
 class TracerTensor(Tensor):
@@ -14,6 +14,8 @@ class TracerTensor(Tensor):
     @staticmethod
     def __new__(cls, elem, proxy):
         # See Note [Passing requires_grad=true tensors to subclasses]
+        # TODO: actually FX tracer in practice allows this, turning
+        # the inputs into leafs, which is reasonable
         assert not elem.requires_grad or not torch.is_grad_enabled()
         return Tensor._make_subclass(cls, elem)
 
@@ -42,7 +44,8 @@ class TracerTensor(Tensor):
             # Some ops (like native_batch_norm_backward) return undefined
             # tensor that get converted into None in Python.  This papers
             # over this problem.
-            # TODO: fix this
+            # TODO: fix this inside core so that None returns from
+            # __torch_dispatch__ turn into undefined tensors
             if t is None:
                 return torch.empty(())
             elif isinstance(t, Tensor):
@@ -52,10 +55,29 @@ class TracerTensor(Tensor):
                 return t
 
         with no_dispatch():
-            return tree_map2(
-                wrap,
-                func(*args, **kwargs),
-                func(
-                    *tree_map(unwrap_proxy, args),
-                    **tree_map(unwrap_proxy, kwargs))
-            )
+            r = func(*args, **kwargs)
+
+        r_proxy = func(
+            *tree_map(unwrap_proxy, args),
+            **tree_map(unwrap_proxy, kwargs))
+
+        # NB: we cannot zip r and r_proxy, or rely on r_proxy knowing its
+        # structure, because r_proxy as implemented in FX typically is a proxy
+        # that will generate IR for accessing subfields as you invoke.  So
+        # r has to "drive" the deconstruction.
+        # NB: this assumes there aren't any recursive return structs, which
+        # is generally a safe bet in the current codegen
+        if isinstance(r, list):
+            return [wrap(t, r_proxy[i]) for i, t in enumerate(r)]
+        elif isinstance(r, tuple):
+            return tuple(wrap(t, r_proxy[i]) for i, t in enumerate(r))
+        else:
+            return wrap(r, r_proxy)
+
+
+class TracerTensorTest(TestCase):
+    pass
+
+
+if __name__ == '__main__':
+    run_tests()
