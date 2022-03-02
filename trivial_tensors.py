@@ -2,10 +2,102 @@ import torch
 from torch import Tensor
 from torch.utils._pytree import tree_map
 from torch.testing._internal.common_utils import (
-    TestCase, run_tests, disable_gc
+    TestCase, run_tests, disable_gc, parametrize,
+    instantiate_parametrized_tests
 )
 
+from utils import no_dispatch
+
 import weakref
+
+# In a lot of use cases for tensor subclasses, there is a concept
+# of an "inner" tensor, which is a normal, non-subclassed tensor
+# that after you do your stuff you can redispatch to.  This file gives recipes
+# for a number of trivial tensors; tensors which look and behave exactly like
+# their inner tensors, and propagate themselves through all invocations.  As
+# it turns out, there are a number of different ways to do the same thing.
+# However, the main axis of variation is this:
+#
+#       Do you actually store the inner tensor (composition / has-a
+#       relationship) or do you make what is effectively a super call
+#       (inheritance / is-a relationship)
+#
+# These options have different tradeoffs:
+#
+#   Composition / Has-a
+#       + Is straightforward to perform operations in the inner layer (just
+#         unwrap the tensor)
+#       + In principle, is compositional with other tensor subclasses; in
+#         practice, compositionality in this way is hard to understand
+#         without more structure (e.g., functorch)
+#       + Allows you to use PyTorch's subsystems (e.g., autograd) multiple
+#         times (e.g., as done in functorch)
+#       - Representation requires two tensors (inner and outer); sometimes
+#         this is unnecessary
+#       - You must synchronize the metadata for the two tensors.  Historically
+#         we had a number of incomplete/incorrect implementations of this;
+#         this file shows how to correctly (and easily).
+#
+#   Inheritance / Is-a
+#       + Efficient representation (only one tensor)
+#       + Do not have to worry about synchronizing metadata
+#       - A little more difficult to call into the inner layer; easy to
+#         accidentally infinite loop.
+#       - Not automatically compositional.  In principle, you could combine
+#         two distinct subclasses by using multiple inheritance, but this
+#         currenlty does not work.
+#
+# Hopefully this file will give you an idea about some of the tools in your
+# toolbox.  I also include some buggy implementations that we've seen in the
+# wild, and explain why they are wrong.
+#
+# Channeling Alban, we probably want to take some of these exemplars and
+# turn them into part of the official public API, so end users don't have
+# to copy paste them into their own functions.
+
+
+class TrivialTensorViaInheritance(Tensor):
+    pass
+
+
+class TrivialTensorViaComposition(Tensor):
+    pass
+
+
+# This variation:
+#   - Doesn't store the inner tensor (makes a super call)
+#   - Uses unmake_subclass to make the super call
+class TrivialTensorViaUnmakeSubclass(Tensor):
+    __slots__ = []
+
+    @staticmethod
+    def __new__(cls, elem):
+        # See Note [Passing requires_grad=true tensors to subclasses]
+        assert not elem.requires_grad or not torch.is_grad_enabled()
+        assert type(elem) is Tensor
+        return Tensor._make_subclass(cls, elem)
+
+    __torch_function__ = torch._C._disabled_torch_function_impl
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        def unwrap(t):
+            if isinstance(t, cls):
+                with no_dispatch():
+                    return torch.Tensor._make_subclass(torch.Tensor, t)
+            else:
+                return t
+
+        def wrap(t):
+            if isinstance(t, Tensor):
+                return TrivialWrapperTensor(t)
+            else:
+                return t
+
+        return tree_map(
+            wrap,
+            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
+        )
 
 
 # This is a "trivial" wrapper tensor because instead of being a tensor (is-a
@@ -64,29 +156,39 @@ class TrivialWrapperTensor(Tensor):
         )
 
 
-TWT = TrivialWrapperTensor
+parametrize_trivial = parametrize('TrivialTensor', [
+    TrivialTensorViaUnmakeSubclass,
+    TrivialWrapperTensor
+])
 
 
-class TrivialWrapperTensorTest(TestCase):
-    def test_no_cycle(self):
+class TrivialTensorTest(TestCase):
+    @parametrize_trivial
+    def test_no_cycle(self, TrivialTensor):
         fins = []
         with disable_gc():
-            r = TWT(torch.empty(2))
+            r = TrivialTensor(torch.empty(2))
             w = weakref.ref(r, lambda _: fins.append(1))
             self.assertEqual(fins, [])
             del r
             self.assertEqual(fins, [1])
             del w
 
-    def test_no_copy(self):
+    @parametrize_trivial
+    def test_no_copy(self, TrivialTensor):
         inner = torch.empty(2)
-        outer = TWT(inner)
+        outer = TrivialTensor(inner)
         self.assertEqual(inner.data_ptr(), outer.data_ptr())
 
-    def test_basic(self):
+    @parametrize_trivial
+    def test_basic(self, TrivialTensor):
         self.assertEqual(
-            TWT(torch.tensor(1.0)) + TWT(torch.tensor(2.0)),
-            TWT(torch.tensor(3.0)))
+            (TrivialTensor(torch.tensor(1.0)) +
+             TrivialTensor(torch.tensor(2.0))),
+            TrivialTensor(torch.tensor(3.0)))
+
+
+instantiate_parametrized_tests(TrivialTensorTest)
 
 
 if __name__ == '__main__':

@@ -23,3 +23,9 @@ def tree_map2(fn: Any, pytree1: PyTree, pytree2: PyTree) -> PyTree:
     assert spec1 == spec2
     return tree_unflatten(
         [fn(i, j) for i, j in zip(flat_args1, flat_args2)], spec1)
+
+
+# IDK if this is actually useful or not
+def unmake_subclass(tensor):
+    with no_dispatch():
+        return torch.Tensor._make_subclass(torch.Tensor, tensor)

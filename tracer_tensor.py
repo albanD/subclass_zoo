@@ -13,11 +13,9 @@ class TracerTensor(Tensor):
 
     @staticmethod
     def __new__(cls, elem, proxy):
-        # See Note [Passing requires_grad=true tensors to subclasses]
-        # TODO: actually FX tracer in practice allows this, turning
-        # the inputs into leafs, which is reasonable
-        assert not elem.requires_grad or not torch.is_grad_enabled()
-        return Tensor._make_subclass(cls, elem)
+        # Unlike other tensor subclasses in the zoo, TracerTensor detaches
+        # autograd upon creation.  (Is this right?)
+        return Tensor._make_subclass(cls, elem, elem.requires_grad)
 
     def __init__(self, elem, proxy):
         # elem does not need to be recorded, because TracerTensor *is a* elem
