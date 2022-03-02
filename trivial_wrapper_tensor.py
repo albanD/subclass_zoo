@@ -28,6 +28,8 @@ import weakref
 # Sometimes some metadata needs to differ between inner and outer, and that
 # gets complicated.  Coming soon!
 class TrivialWrapperTensor(Tensor):
+    __slots__ = ['elem']
+
     @staticmethod
     def __new__(cls, elem):
         # See Note [Passing requires_grad=true tensors to subclasses]
