@@ -45,7 +45,7 @@ import weakref
 #         actually work without https://github.com/pytorch/pytorch/pull/73684
 #       - Not automatically compositional.  In principle, you could combine
 #         two distinct subclasses by using multiple inheritance, but this
-#         currenlty does not work.
+#         currently does not work.
 #
 # Hopefully this file will give you an idea about some of the tools in your
 # toolbox.  I also include some buggy implementations that we've seen in the
@@ -64,6 +64,7 @@ class TrivialTensorViaInheritance(BaseTensor):
         def wrap(t):
             # not isinstance for inplace
             # TODO: inplace properly
+            # TODO: this is a common footgun
             if isinstance(t, Tensor) and not isinstance(t, cls):
                 return cls(t)
             else:
