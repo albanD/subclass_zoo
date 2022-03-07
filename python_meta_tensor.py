@@ -128,7 +128,7 @@ class PythonMetaTensor(PythonMetaTensorMode):
         return tree_map(wrap, super().__torch_dispatch__(func, types, args, kwargs))
 
 
-class TrivialTensorTest(TestCase):
+class PythonMetaTensorTest(TestCase):
     def test_basic(self):
         x = PythonMetaTensor(torch.empty(2, 2, device='meta'))
         y = x + x
