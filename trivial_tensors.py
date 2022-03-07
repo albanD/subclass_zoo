@@ -41,8 +41,8 @@ import weakref
 #   Inheritance / Is-a
 #       + Efficient representation (only one tensor)
 #       + Do not have to worry about synchronizing metadata
-#       - A little more difficult to call into the inner layer; easy to
-#         accidentally infinite loop.
+#       = You use super() to call into the inner layer.  This does not
+#         actually work without https://github.com/pytorch/pytorch/pull/73684
 #       - Not automatically compositional.  In principle, you could combine
 #         two distinct subclasses by using multiple inheritance, but this
 #         currenlty does not work.
@@ -57,21 +57,11 @@ import weakref
 
 
 class TrivialTensorViaInheritance(Tensor):
-    pass
-
-
-class TrivialTensorViaComposition(Tensor):
-    pass
-
-
-# This variation:
-#   - Doesn't store the inner tensor (makes a super call)
-#   - Uses unmake_subclass to make the super call
-class TrivialTensorViaUnmakeSubclass(Tensor):
     __slots__ = []
 
     @staticmethod
     def __new__(cls, elem):
+        return super().__new__(cls, elem)
         # See Note [Passing requires_grad=true tensors to subclasses]
         assert not elem.requires_grad or not torch.is_grad_enabled()
         assert type(elem) is Tensor
@@ -79,25 +69,22 @@ class TrivialTensorViaUnmakeSubclass(Tensor):
 
     __torch_function__ = torch._C._disabled_torch_function_impl
 
-    @classmethod
-    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        def unwrap(t):
-            if isinstance(t, cls):
-                with no_dispatch():
-                    return torch.Tensor._make_subclass(torch.Tensor, t)
-            else:
-                return t
-
+    @staticmethod
+    def __torch_dispatch__(func, types, args=(), kwargs=None):
         def wrap(t):
             if isinstance(t, Tensor):
-                return TrivialWrapperTensor(t)
+                return TrivialTensorViaInheritance(t)
             else:
                 return t
 
         return tree_map(
             wrap,
-            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
+            super().__torch_dispatch__(func, types, args, kwargs)
         )
+
+
+class TrivialTensorViaComposition(Tensor):
+    pass
 
 
 # This is a "trivial" wrapper tensor because instead of being a tensor (is-a
@@ -157,7 +144,7 @@ class TrivialWrapperTensor(Tensor):
 
 
 parametrize_trivial = parametrize('TrivialTensor', [
-    TrivialTensorViaUnmakeSubclass,
+    TrivialTensorViaInheritance,
     TrivialWrapperTensor
 ])
 
