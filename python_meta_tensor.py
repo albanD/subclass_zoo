@@ -74,6 +74,27 @@ class PythonMetaTensorMode(torch.Tensor):
             bag_size = offsets.new_empty(offsets.size())
             max_indices = offsets.new_empty(bag_size.size())
             return output, offset2bag, bag_size, max_indices
+        elif func == torch.ops.aten.index_select:
+            # TODO: when I didn't have embedding implemented, it reported that
+            # index_select wasn't implemented, but it didn't actually help to
+            # implement this (because once we go to the
+            # CompositeExplicitAutograd, Python key is disabled and we won't
+            # come back here).  Oof.
+            self, dim, index = args
+            result_size = list(self.size())
+            if self.dim() > 0:
+                result_size[dim] = index.numel()
+            return self.new_empty(result_size)
+        elif func == torch.ops.aten.embedding:
+            args = fill_defaults(args, 5, [-1, False, False])
+            weight, indices, padding_idx, scale_grad_by_freq, sparse = args
+            assert weight.dim() == 2
+            assert indices.dtype in [torch.long, torch.int]
+            if indices.dim() == 1:
+                return weight.index_select(0, indices)
+            size = list(indices.size())
+            size.extend(weight.size()[1:])
+            return weight.index_select(0, indices.reshape(-1)).view(size)
         # add your other patches here
 
         return super().__torch_dispatch__(func, types, args, kwargs)
@@ -117,6 +138,13 @@ class TrivialTensorTest(TestCase):
         self.assertRaises(NotImplementedError, lambda: embedding_sum(input, offsets))
         r = embedding_sum(PythonMetaTensor(input), PythonMetaTensor(offsets))
         self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device='meta'))
+
+    def test_embedding_via_mode(self):
+        with enable_python_mode(PythonMetaTensorMode):
+            embedding = torch.nn.Embedding(10, 3, device='meta')
+            input = torch.empty((2, 4), dtype=torch.long, device='meta')
+            r = embedding(input)
+            self.assertEqual(r, torch.empty((2, 4, 3), dtype=torch.float, device='meta'))
 
     def test_embedding_bag_via_mode(self):
         with enable_python_mode(PythonMetaTensorMode):
