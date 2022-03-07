@@ -6,7 +6,7 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests
 )
 
-from utils import no_dispatch
+from base_tensor import BaseTensor
 
 import weakref
 
@@ -56,24 +56,14 @@ import weakref
 # to copy paste them into their own functions.
 
 
-class TrivialTensorViaInheritance(Tensor):
+class TrivialTensorViaInheritance(BaseTensor):
     __slots__ = []
 
-    @staticmethod
-    def __new__(cls, elem):
-        return super().__new__(cls, elem)
-        # See Note [Passing requires_grad=true tensors to subclasses]
-        assert not elem.requires_grad or not torch.is_grad_enabled()
-        assert type(elem) is Tensor
-        return Tensor._make_subclass(cls, elem)
-
-    __torch_function__ = torch._C._disabled_torch_function_impl
-
-    @staticmethod
-    def __torch_dispatch__(func, types, args=(), kwargs=None):
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         def wrap(t):
             if isinstance(t, Tensor):
-                return TrivialTensorViaInheritance(t)
+                return cls(t)
             else:
                 return t
 
@@ -83,8 +73,34 @@ class TrivialTensorViaInheritance(Tensor):
         )
 
 
-class TrivialTensorViaComposition(Tensor):
-    pass
+class TrivialTensorViaComposition(BaseTensor):
+    __slots__ = ['elem']
+
+    def __init__(self, elem):
+        super().__init__(elem)
+        self.elem = elem
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        def unwrap(t):
+            if isinstance(t, cls):
+                return t.elem
+            else:
+                return t
+
+        # You don't have to wrap; without wrapping you lose the wrapper
+        # tensor after any operation, which may be desirable for some
+        # use cases
+        def wrap(t):
+            if isinstance(t, Tensor):
+                return cls(t)
+            else:
+                return t
+
+        return tree_map(
+            wrap,
+            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
+        )
 
 
 # This is a "trivial" wrapper tensor because instead of being a tensor (is-a
@@ -106,46 +122,10 @@ class TrivialTensorViaComposition(Tensor):
 #
 # Sometimes some metadata needs to differ between inner and outer, and that
 # gets complicated.  Coming soon!
-class TrivialWrapperTensor(Tensor):
-    __slots__ = ['elem']
-
-    @staticmethod
-    def __new__(cls, elem):
-        # See Note [Passing requires_grad=true tensors to subclasses]
-        assert not elem.requires_grad or not torch.is_grad_enabled()
-        return Tensor._make_subclass(cls, elem)
-
-    def __init__(self, elem):
-        self.elem = elem
-
-    __torch_function__ = torch._C._disabled_torch_function_impl
-
-    @classmethod
-    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        def unwrap(t):
-            if isinstance(t, cls):
-                return t.elem
-            else:
-                return t
-
-        # You don't have to wrap; without wrapping you lose the wrapper
-        # tensor after any operation, which may be desirable for some
-        # use cases
-        def wrap(t):
-            if isinstance(t, Tensor):
-                return TrivialWrapperTensor(t)
-            else:
-                return t
-
-        return tree_map(
-            wrap,
-            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
-        )
-
 
 parametrize_trivial = parametrize('TrivialTensor', [
     TrivialTensorViaInheritance,
-    TrivialWrapperTensor
+    TrivialTensorViaComposition,
 ])
 
 
