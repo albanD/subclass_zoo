@@ -3,6 +3,7 @@ from torch.utils._pytree import tree_map
 from torch.testing._internal.common_utils import (
     TestCase, run_tests
 )
+from torch.utils._python_dispatch import enable_python_mode
 
 import torch.nn
 
@@ -26,29 +27,17 @@ def fill_defaults(args, n, defaults_tail):
         r.append(defaults_tail[i-n+len(defaults_tail)])
     return r
 
-# TODO: Not written in terms of BaseTensor so PyPER can easily copy paste this
-class PythonMetaTensor(torch.Tensor):
+class PythonMetaTensorMode(torch.Tensor):
+    # TODO: figure out a better idiom for this; "pure" modes shouldn't be
+    # instantiated so arguably they shouldn't be torch.Tensor subclasses,
+    # but then making sure someone doesn't actually try to instantiate this
+    # causes mixins on the tensor itself to stop working
     @staticmethod
     def __new__(cls, elem):
-        # TODO: this will not backprop correctly (as all requires grad inputs
-        # will look like leaves) but it will "look" like it has correct
-        # requires_grad.  Once https://github.com/pytorch/pytorch/pull/73850
-        # lands you can delete this static method entirely
-        return cls._make_subclass(cls, elem, elem.requires_grad)
-
-    def __init__(self, elem):
-        assert elem.is_meta
-
-    __torch_function__ = torch._C._disabled_torch_function_impl
+        raise RuntimeError("this mode mixin cannot actually be instantiated")
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        def wrap(t):
-            if isinstance(t, torch.Tensor) and not isinstance(t, cls):
-                return cls(t)
-            else:
-                return t
-
         if func == torch.ops.aten._embedding_bag:
             # Defaults can be determined by reading native_functions.yaml
             # We will soon make these available directly from the torch.ops
@@ -72,8 +61,32 @@ class PythonMetaTensor(torch.Tensor):
             return output, offset2bag, bag_size, max_indices
         # add your other patches here
 
-        r = super().__torch_dispatch__(func, types, args, kwargs)
-        return tree_map(wrap, r)
+        return super().__torch_dispatch__(func, types, args, kwargs)
+
+class PythonMetaTensor(PythonMetaTensorMode):
+    @staticmethod
+    def __new__(cls, elem):
+        # TODO: this will not backprop correctly (as all requires grad inputs
+        # will look like leaves) but it will "look" like it has correct
+        # requires_grad.  Once https://github.com/pytorch/pytorch/pull/73850
+        # lands you can delete this static method entirely
+        return cls._make_subclass(cls, elem, elem.requires_grad)
+
+    def __init__(self, elem):
+        assert elem.is_meta
+
+    __torch_function__ = torch._C._disabled_torch_function_impl
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        # Propagate the wrapper
+        def wrap(t):
+            if isinstance(t, torch.Tensor) and not isinstance(t, cls):
+                return cls(t)
+            else:
+                return t
+
+        return tree_map(wrap, super().__torch_dispatch__(func, types, args, kwargs))
 
 
 class TrivialTensorTest(TestCase):
@@ -89,6 +102,14 @@ class TrivialTensorTest(TestCase):
         self.assertRaises(NotImplementedError, lambda: embedding_sum(input, offsets))
         r = embedding_sum(PythonMetaTensor(input), PythonMetaTensor(offsets))
         self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device='meta'))
+
+    def test_embedding_bag_via_mode(self):
+        with enable_python_mode(PythonMetaTensorMode):
+            embedding_sum = torch.nn.EmbeddingBag(10, 3, mode='sum', device='meta')
+            input = torch.empty(8, dtype=torch.long, device='meta')
+            offsets = torch.empty(2, dtype=torch.long, device='meta')
+            r = embedding_sum(input, offsets)
+            self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device='meta'))
 
 
 if __name__ == '__main__':
