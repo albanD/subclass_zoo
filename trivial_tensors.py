@@ -22,63 +22,95 @@ import weakref
 #       relationship) or do you make what is effectively a super call
 #       (inheritance / is-a relationship)
 #
-# These options have different tradeoffs:
+# These options have different tradeoffs which are discussed in more
+# detail below.  Hopefully this file will give you an idea about some of the
+# tools in your toolbox.
 #
-#   Composition / Has-a
-#       + Is straightforward to perform operations in the inner layer (just
-#         unwrap the tensor)
-#       + In principle, is compositional with other tensor subclasses; in
-#         practice, compositionality in this way is hard to understand
-#         without more structure (e.g., functorch)
-#       + Allows you to use PyTorch's subsystems (e.g., autograd) multiple
-#         times (e.g., as done in functorch)
-#       - Representation requires two tensors (inner and outer); sometimes
-#         this is unnecessary
-#       - You must synchronize the metadata for the two tensors.  Historically
-#         we had a number of incomplete/incorrect implementations of this;
-#         this file shows how to correctly (and easily).
+# WARNING: These tensors inherit from BaseTensor, which is a local
+# compatibility shim that tracks changes to Tensor that we intend to make but
+# haven't made it to core.  If you want to use these classes you will need to
+# include the extra bits from BaseTensor.
 #
-#   Inheritance / Is-a
-#       + Efficient representation (only one tensor)
-#       + Do not have to worry about synchronizing metadata
-#       = You use super() to call into the inner layer.  This does not
-#         actually work without https://github.com/pytorch/pytorch/pull/73684
-#       - Not automatically compositional.  In principle, you could combine
-#         two distinct subclasses by using multiple inheritance, but this
-#         currently does not work.
+# TODO: Channeling Alban, we probably want to take some of these exemplars and
+# turn them into part of the official public API, so end users don't have to
+# copy paste them into their own functions.
 #
-# Hopefully this file will give you an idea about some of the tools in your
-# toolbox.  I also include some buggy implementations that we've seen in the
-# wild, and explain why they are wrong.
-#
-# Channeling Alban, we probably want to take some of these exemplars and
-# turn them into part of the official public API, so end users don't have
-# to copy paste them into their own functions.
+# TODO: Redo these examples with compositionality in mind.
+
 
 
 class TrivialTensorViaInheritance(BaseTensor):
-    __slots__ = []
+    """
+    TrivialTensorViaInheritance extends tensor behavior using inheritance ("is
+    a").  These implementations are very straightforward and we recommend
+    using them if it works for your use case.  To get the base behavior,
+    you use standard object-oriented idiom of super().
+
+    Benefits and downsides of this representation:
+
+        + Efficient representation (only one tensor).
+        + Do not have to worry about synchronizing metadata between the inner
+          and outer tensor.
+        = Requires multiple inheritance to do composition.  This *does*
+          work, but it is a bit mind-bending, you have to deal with the
+          diamond inheritance problem, and traditionally you only get a fixed
+          set of composition (rather than dynamic, as in functorch) unless
+          you're willing to generate classes on the fly.
+        - Doesn't work if you need to run internal PyTorch subsystems
+          (e.g., autograd) multiple times.
+        - Doesn't work if the internal tensor has a different shape
+          than the outer tensor.
+        - Doesn't work if you need multiple internal tensors.
+    """
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         def wrap(t):
-            # not isinstance for inplace
-            # TODO: inplace properly
-            # TODO: this is a common footgun
+            # When could the returned tensor already be our subclass?
+            # The most common situation is when an input tensor
+            # is returned as an output tensor, e.g., inplace or out
+            # implementations.
             if isinstance(t, Tensor) and not isinstance(t, cls):
                 return cls(t)
             else:
                 return t
 
-        r = super().__torch_dispatch__(func, types, args, kwargs)
-        return tree_map(
-            wrap,
-            r
-        )
+        return tree_map(wrap, super().__torch_dispatch__(func, types, args, kwargs))
 
 
 class TrivialTensorViaComposition(BaseTensor):
-    __slots__ = ['elem']
+    """
+    TrivialTensorViaComposition extends tesor behavior using composition ("has
+    a").  You can see that unlike inheritance, we save the original tensor in
+    a field in the tensor.  These are often referred to as "wrapper tensors",
+    as you are wrapping the original tensor.
+
+    The nuance of wrapper tensors is that the external wrapper tensor is still
+    required to have all of the metadata that the inner tensor has; this
+    includes stride and storage!  In this example, we assume the inner and
+    outer metadata is exactly synchronized... so in fact the wrapper tensor is
+    literally just a TrivialTensorViaInheritance (in particular, the outer
+    wrapper points to the same storage as the inner wrapped tensor).  The only
+    difference is that we've also recorded the original tensor as an element
+    on the class as well.
+
+    Benefits and downsides of this representation:
+
+    + Many people find perform operations in the inner layer more
+      intuitive (just unwrap the tensor)
+    + In principle, is compositional with other tensor subclasses; in
+      practice, compositionality in this way is hard to understand
+      without more structure (e.g., functorch)
+    + Allows you to use PyTorch's subsystems (e.g., autograd) multiple
+      times (e.g., as done in functorch)
+    + Metadata between the inside and outside can diverge (not shown in
+      this example, TODO: add to zoo)
+    - Representation requires two tensors (inner and outer); sometimes
+      this is unnecessary
+    - You must synchronize the metadata for the two tensors.  Historically
+      we had a number of incomplete/incorrect implementations of this;
+      this file shows how to correctly (and easily).
+    """
 
     def __init__(self, elem):
         super().__init__(elem)
@@ -92,9 +124,6 @@ class TrivialTensorViaComposition(BaseTensor):
             else:
                 return t
 
-        # You don't have to wrap; without wrapping you lose the wrapper
-        # tensor after any operation, which may be desirable for some
-        # use cases
         def wrap(t):
             if isinstance(t, Tensor) and not isinstance(t, cls):
                 return cls(t)
@@ -107,32 +136,14 @@ class TrivialTensorViaComposition(BaseTensor):
         )
 
 
-# This is a "trivial" wrapper tensor because instead of being a tensor (is-a
-# relationship), it instead contains a tensor (has-a relationship).  It's
-# trivial because we just directly forward all operations onto the inner
-# contained tensor.
-#
-# This wrapper is implemented in a very funny way: it assumes the inner
-# metadata is exactly synchronized with the outer metadata; in particular, the
-# storage of the outer wrapper points to the storage of the inner wrapped
-# tensor!  So you might wonder what the point of this wrapper tensor is, since
-# the inner and outer tensor look exactly the same.  Well:
-#
-#   - The inner and outer tensors can have differing metadata for other
-#     subsystems; e.g., you can run autograd multiple times using this wrapper.
-#
-#   - You don't have to use no_dispatch() to get to the "inner" layer, you
-#     just unwrap and go.
-#
-# Sometimes some metadata needs to differ between inner and outer, and that
-# gets complicated.  Coming soon!
-
 parametrize_trivial = parametrize('TrivialTensor', [
     TrivialTensorViaInheritance,
     TrivialTensorViaComposition,
 ], name_fn=lambda x: x.__name__)
 
 
+# We run our tests on both formulations of trivial tensors to show that
+# in the trivial case, they are exactly equivalent
 class TrivialTensorTest(TestCase):
     @parametrize_trivial
     def test_no_cycle(self, TrivialTensor):
