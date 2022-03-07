@@ -1,11 +1,13 @@
 import torch
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import tree_map, tree_flatten
 from torch.testing._internal.common_utils import (
     TestCase, run_tests
 )
 from torch.utils._python_dispatch import enable_python_mode
 
 import torch.nn
+
+import itertools
 
 def fill_defaults(args, n, defaults_tail):
     """
@@ -38,6 +40,12 @@ class PythonMetaTensorMode(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        # Only interpose for meta invocations
+        flat_args, _ = tree_flatten(args)
+        flat_kwargs, _ = tree_flatten(kwargs)
+        if not any(isinstance(t, torch.Tensor) and t.is_meta for t in itertools.chain(flat_args, flat_kwargs)):
+            return super().__torch_dispatch__(func, types, args, kwargs)
+
         if func == torch.ops.aten._embedding_bag:
             # Defaults can be determined by reading native_functions.yaml
             # We will soon make these available directly from the torch.ops
@@ -110,6 +118,13 @@ class TrivialTensorTest(TestCase):
             offsets = torch.empty(2, dtype=torch.long, device='meta')
             r = embedding_sum(input, offsets)
             self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device='meta'))
+
+            # Make sure we don't interpose on non-meta computation
+            embedding_sum = torch.nn.EmbeddingBag(10, 3, mode='sum')
+            input = torch.tensor([1,2,4,5,4,3,2,9], dtype=torch.long)
+            offsets = torch.tensor([0,4], dtype=torch.long)
+            r = embedding_sum(input, offsets)
+            self.assertFalse(r.is_meta)
 
 
 if __name__ == '__main__':
