@@ -20,7 +20,14 @@ def fill_defaults(args, n, defaults_tail):
         args: the list of positional arguments passed to __torch_dispatch__
         n: the number of arguments you are expecting to get
         defaults_tail: default values for the arguments, starting from the
-        end of the list
+            end of the list
+
+    Example:
+
+        >>> fill_defaults([1, 2, 3], 5, [3, 4, 5])
+        [1, 2, 3, 4, 5]
+        >>> fill_defaults([1, 2, 3], 5, [None, None, None])
+        [1, 2, 3, None, None]]
     """
     if n - len(defaults_tail) > len(args):
         raise RuntimeError("not enough defaults to fill arguments")
