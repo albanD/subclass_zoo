@@ -8,5 +8,13 @@ figured out so far!
 
 Here's what's in the repo so far:
 
-* `negative_tensor.py` - a reimplementation of negative tensor views as
+- `negative_tensor.py` - a reimplementation of negative tensor views as
   implemented in PyTorch core (https://github.com/pytorch/pytorch/pull/56058)
+
+TODO
+
+- Implement speculate and validate tensor
+  https://docs.google.com/document/d/1s44XJg_AQFZbSm4X1u9bE6V2ELstFdlekA_m2lNWn1Y/edit#heading=h.5pt6253mfam1
+- CUDA sanitizer in Python (hard cuz no event hooks)
+- Sparse gradients / outputs per Christian (using modes)
+- SSD tensor
