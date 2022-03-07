@@ -10,6 +10,12 @@ Here's what's in the repo so far:
 
 - `negative_tensor.py` - a reimplementation of negative tensor views as
   implemented in PyTorch core (https://github.com/pytorch/pytorch/pull/56058)
+- `python_meta_tensor.py` - a demonstration of how to extend an existing
+  tensor (meta tensor) with some extra behavior (in this case, implementations
+  of meta functions for operations that don't support it natively)
+- `trivial_tensors.py` - a comparison for two ways how to "wrap" tensors,
+  one using inheritance (is-a) and one using composition (has-a) (so called
+  wrapper tensors)
 
 TODO
 
