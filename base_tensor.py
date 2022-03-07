@@ -12,7 +12,7 @@ class BaseTensor(torch.Tensor):
         if requires_grad is None:
             return super().__new__(cls, elem)
         else:
-            cls._make_subclass(cls, elem, requires_grad)
+            return cls._make_subclass(cls, elem, requires_grad)
 
     # To ensure constructors can cooperate with one another, must accept and
     # ignore element tensor (TODO: is this right???)
