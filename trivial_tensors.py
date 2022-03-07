@@ -62,14 +62,17 @@ class TrivialTensorViaInheritance(BaseTensor):
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         def wrap(t):
-            if isinstance(t, Tensor):
+            # not isinstance for inplace
+            # TODO: inplace properly
+            if isinstance(t, Tensor) and not isinstance(t, cls):
                 return cls(t)
             else:
                 return t
 
+        r = super().__torch_dispatch__(func, types, args, kwargs)
         return tree_map(
             wrap,
-            super().__torch_dispatch__(func, types, args, kwargs)
+            r
         )
 
 
@@ -92,7 +95,7 @@ class TrivialTensorViaComposition(BaseTensor):
         # tensor after any operation, which may be desirable for some
         # use cases
         def wrap(t):
-            if isinstance(t, Tensor):
+            if isinstance(t, Tensor) and not isinstance(t, cls):
                 return cls(t)
             else:
                 return t
@@ -126,7 +129,7 @@ class TrivialTensorViaComposition(BaseTensor):
 parametrize_trivial = parametrize('TrivialTensor', [
     TrivialTensorViaInheritance,
     TrivialTensorViaComposition,
-])
+], name_fn=lambda x: x.__name__)
 
 
 class TrivialTensorTest(TestCase):
@@ -149,6 +152,8 @@ class TrivialTensorTest(TestCase):
 
     @parametrize_trivial
     def test_basic(self, TrivialTensor):
+        # NB: this is not so basic, this executes a shit ton of
+        # ops, including inplace ops
         self.assertEqual(
             (TrivialTensor(torch.tensor(1.0)) +
              TrivialTensor(torch.tensor(2.0))),
