@@ -60,6 +60,7 @@ class PythonMetaTensorMode(torch.Tensor):
             args = fill_defaults(args, 9, [False, 0, False, None, False, -1])
             weight, indices, offsets, scale_grad_by_freq, mode, sparse, \
                 per_sample_weights, include_last_offset, padding_idx = args
+            assert not kwargs
             # I determined the meaning of the outputs and sizes by reading
             # over the kernel in aten/src/ATen/native/EmbeddingBag.cpp
             output = weight.new_empty(
@@ -81,6 +82,7 @@ class PythonMetaTensorMode(torch.Tensor):
             # CompositeExplicitAutograd, Python key is disabled and we won't
             # come back here).  Oof.
             self, dim, index = args
+            assert not kwargs
             result_size = list(self.size())
             if self.dim() > 0:
                 result_size[dim] = index.numel()
@@ -88,6 +90,7 @@ class PythonMetaTensorMode(torch.Tensor):
         elif func == torch.ops.aten.embedding:
             args = fill_defaults(args, 5, [-1, False, False])
             weight, indices, padding_idx, scale_grad_by_freq, sparse = args
+            assert not kwargs
             assert weight.dim() == 2
             assert indices.dtype in [torch.long, torch.int]
             if indices.dim() == 1:
