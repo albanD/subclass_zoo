@@ -24,3 +24,4 @@ TODO
 - CUDA sanitizer in Python (hard cuz no event hooks)
 - Sparse gradients / outputs per Christian (using modes)
 - SSD tensor
+- Reimplement functionalization tensor

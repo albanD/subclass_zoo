@@ -76,7 +76,7 @@ class InnerAutogradTensorTest(TestCase):
         # Note we have to extract out the inner tensor (which requires_grad)
         # to actually differentiate
         r.sum().elem.backward()
-        self.assertEquals(x.grad, torch.tensor([2.0]))  # two uses!
+        self.assertEqual(x.grad, torch.tensor([2.0]))  # two uses!
 
     def test_embedding(self):
         input = torch.tensor([[1,2,4,5],[4,3,2,9]])
@@ -98,8 +98,8 @@ class InnerAutogradTensorTest(TestCase):
         # confusing so be careful!
         x = InnerAutogradTensor(w1) + w2
         g1, g2 = torch.autograd.grad(x.elem.sum(), (w1, w2))
-        self.assertEquals(g1, torch.ones(1))
-        self.assertEquals(g2, torch.ones(1))
+        self.assertEqual(g1, torch.ones(1))
+        self.assertEqual(g2, torch.ones(1))
 
         # Hopefully this makes more sense: w1 doesn't require gradients from
         # the outer context (due to InnerAutogradTensor), so it doesn't get
@@ -107,8 +107,8 @@ class InnerAutogradTensorTest(TestCase):
         # not detaching from __new__, but once again... very confusing.
         x = InnerAutogradTensor(w1) + w2
         g1, g2 = torch.autograd.grad(x.sum(), (w1, w2), allow_unused=True)
-        self.assertEquals(g1, None)
-        self.assertEquals(g2, torch.ones(1))
+        self.assertEqual(g1, None)
+        self.assertEqual(g2, torch.ones(1))
 
 if __name__ == '__main__':
     run_tests()
