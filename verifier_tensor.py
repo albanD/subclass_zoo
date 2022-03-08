@@ -5,6 +5,8 @@ from torch.fx import Interpreter, Node
 from tracer_tensor import dispatch_trace
 from base_tensor import BaseTensor
 
+# https://github.com/albanD/subclass_zoo/blob/33d7afe63c2a336e01eaf3e81fba085a68e3955f/bug_zoo.py#L18-L24
+
 # how to do speculate and validate
 #   - need a function under trace (dispatch_trace)
 #   - first time run with normal TracerTensor
