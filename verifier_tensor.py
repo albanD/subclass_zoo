@@ -97,6 +97,7 @@ class SpeculatingJit:
             assert r.dtype == verifier_r.dtype
             return r
 
+
 class VerifierTensorTest(TestCase):
     def test_basic(self):
         def root(x, y):
@@ -123,7 +124,7 @@ class VerifierTensorTest(TestCase):
         f = SpeculatingJit(root)
         r = f(torch.zeros(2), torch.zeros(2))
         self.assertEqual(r, torch.zeros(2))
-        f(torch.ones(2), torch.zeros(2))
+        self.assertRaises(AssertionError, lambda: f(torch.ones(2), torch.zeros(2)))
 
 if __name__ == '__main__':
     run_tests()
