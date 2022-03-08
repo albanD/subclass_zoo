@@ -25,3 +25,4 @@ TODO
 - Sparse gradients / outputs per Christian (using modes)
 - SSD tensor
 - Reimplement functionalization tensor
+- Nested tensor
