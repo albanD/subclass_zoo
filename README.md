@@ -27,3 +27,4 @@ TODO
 - SSD tensor
 - Reimplement functionalization tensor
 - Nested tensor
+- Custom allocator mode (albanD)
