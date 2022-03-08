@@ -148,6 +148,17 @@ graph():
     %add : [#users=1] = call_function[target=torch.ops.aten.add](args = (%arg_1, %arg_2), kwargs = {})
     return add""")
 
+    def test_constant(self):
+        x = torch.ones(2)
+        _, g = dispatch_trace(lambda y: x + y, (torch.ones(2),))
+        self.assertExpectedInline(str(g.graph), """\
+graph():
+    %arg_1 : [#users=1] = placeholder[target=arg_1]
+    %_tensor_constant0 : [#users=1] = get_attr[target=_tensor_constant0]
+    %add : [#users=1] = call_function[target=torch.ops.aten.add](args = (%_tensor_constant0, %arg_1), kwargs = {})
+    return add""")
+
+
 
 if __name__ == '__main__':
     run_tests()

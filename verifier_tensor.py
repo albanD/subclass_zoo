@@ -12,13 +12,27 @@ from base_tensor import BaseTensor
 # recovery is not necessary
 
 class Verifier:
-    def __init__(self, node):
+    def __init__(self, interpreter, node):
         self.node = node
+        # We aren't actually going to run the interpreter, it's just
+        # here for fetch_attr
+        self.interpreter = interpreter
+        # TODO: IDK if there's a better way to do this
+        self.constant_map = {}
 
     def advance(self):
         node = self.node
         self.node = node.next
+
+        while node.op == "get_attr":
+            self.constant_map[self.interpreter.fetch_attr(node.target)] = node
+            node = self.node
+            self.node = node.next
+
         return node
+
+    def constant_node(self, t):
+        return self.constant_map[t]
 
 VERIFIER = None
 
@@ -34,27 +48,32 @@ class VerifierTensor(BaseTensor):
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         # Verify that this is correct
         node = VERIFIER.advance()
-        assert node.op == "call_function"
-        # TODO: how come the saved target in FX isn't an overload and is a
-        # packet???
+        assert node.op == "call_function", node.op
+        # TODO: this is a bug, the saved function in FX should be an overload,
+        # not an overload packet
         assert node.target == func.overloadpacket
 
-        for i, v in enumerate(node.args):
-            if isinstance(v, Node):
-                assert isinstance(args[i], VerifierTensor)
-                assert v is args[i].node
+        def translate(n, v):
+            if isinstance(n, Node):
+                if isinstance(v, VerifierTensor):
+                    assert n is v.node
+                    return v
+                else:
+                    assert n is VERIFIER.constant_node(v)
+                    return v.to("meta")
             else:
-                assert v == args[i]
+                assert n == v
+                return v
 
-        for k, v in node.kwargs.items():
-            if isinstance(v, Node):
-                assert isinstance(kwargs[k], VerifierTensor)
-                assert v is kwargs[k].node
-            else:
-                assert v == kwargs[k]
+        meta_args = []
+        meta_kwargs = {}
+        for i, n in enumerate(node.args):
+            meta_args.append(translate(n, args[i]))
+        for k, n in node.kwargs.items():
+            meta_kwargs[k] = translate(n, kwargs[k])
         assert len(node.kwargs) == len(kwargs)
 
-        r = super().__torch_dispatch__(func, types, args, kwargs)
+        r = super().__torch_dispatch__(func, types, tuple(meta_args), meta_kwargs)
 
         # For the multi-outputs need to advance verifier past the indexing
         # nodes
@@ -82,8 +101,15 @@ class SpeculatingJit:
             return r
         else:
             # assume the placeholder nodes are first
+            # TODO: there is a problem with the verifier design here which
+            # is that it is not possible to free constants that are captured
+            # by the graph, which might be important for memory usage
+            # if FX transformation did weight transformation.  I think what
+            # you want to do is stub out the tensors with meta "shadows"
+            # that have a correspondence to getattr nodes but it is a little
+            # fiddly to implement
             global VERIFIER
-            VERIFIER = Verifier(next(iter(self.graph.graph.nodes)))
+            VERIFIER = Verifier(Interpreter(self.graph), next(iter(self.graph.graph.nodes)))
             i = 0
             verifier_args = []
             for a in args:
@@ -109,6 +135,17 @@ class VerifierTensorTest(TestCase):
         r = f(torch.zeros(2), torch.zeros(2))
         self.assertEqual(r, torch.zeros(2))
         r2 = f(torch.ones(2), torch.zeros(2))
+        self.assertEqual(r2, torch.ones(2))
+
+    def test_constant(self):
+        x = torch.zeros(2)
+        def root(y):
+            return torch.add(x, y)
+
+        f = SpeculatingJit(root)
+        r = f(torch.zeros(2))
+        self.assertEqual(r, torch.zeros(2))
+        r2 = f(torch.ones(2))
         self.assertEqual(r2, torch.ones(2))
 
     def test_validation_failure(self):

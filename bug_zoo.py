@@ -15,6 +15,14 @@ class BugZoo(TestCase):
         x = BuggyTensor(torch.tensor(1.0))
         self.assertRaisesRegex(TypeError, "foobar", lambda: x + x)
 
+    @unittest.skip
+    def test_super_dispatch_segfault(self):
+        class SuperDispatchSegfaultTensor(BaseTensor):
+            @classmethod
+            def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+                return super().__torch_dispatch__(func, types, list(args), kwargs)
+        SuperDispatchSegfaultTensor(torch.tensor(1.0)).neg()
+
 
 if __name__ == '__main__':
     run_tests()
