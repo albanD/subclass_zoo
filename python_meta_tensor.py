@@ -18,6 +18,8 @@ porting kernels to structured kernels, which is a relatively time consuming
 process (although it ensures that our meta implementations are 100% correct,
 as they are derived from a single source of truth).
 
+This idea for solving this problem originally comes from Can Balioglu at
+https://github.com/pytorch/pytorch/pull/66317/
 With tensor subclasses, we can create a subclass of meta tensor,
 PythonMetaTensor, which manually adds support for missing meta device
 implementations. Indeed, we can even implement this as a mode, so that when a
