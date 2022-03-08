@@ -24,6 +24,10 @@ class Verifier:
         node = self.node
         self.node = node.next
 
+        # Whenever constant nodes show up, FX will give these get_attr nodes.
+        # When we're verifying torch dispatch calls this is not relevant,
+        # but we do need to know about these so that we can appropriately
+        # check if the user is reusing the correct constants.
         while node.op == "get_attr":
             self.constant_map[self.interpreter.fetch_attr(node.target)] = node
             node = self.node
@@ -60,6 +64,8 @@ class VerifierTensor(BaseTensor):
                     return v
                 else:
                     assert n is VERIFIER.constant_node(v)
+                    # Need to translate constants to meta so that
+                    # we satisfy device checks
                     return v.to("meta")
             else:
                 assert n == v
