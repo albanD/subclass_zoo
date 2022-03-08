@@ -50,7 +50,7 @@ class InnerAutogradTensor(BaseTensor):
                 return t
 
         # Override gradient behavior
-        if func == torch.ops.aten.embedding:
+        if func == torch.ops.aten.embedding.default:
             args = fill_defaults(args, 5, [-1, False, False])
             weight, indices, padding_idx, scale_grad_by_freq, _sparse = map(unwrap, args)
             assert not kwargs

@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-# from torch.fx import Tracer
+from torch.fx import Tracer, GraphModule
 from torch.fx.passes.shape_prop import _extract_tensor_metadata
 from torch.utils._pytree import tree_map
 from torch.testing._internal.common_utils import TestCase, run_tests
@@ -74,7 +74,8 @@ class TracerTensor(Tensor):
 
 
 class TracerTensorTest(TestCase):
-    pass
+    def test_basic(self):
+        t = Tracer()
 
 
 if __name__ == '__main__':

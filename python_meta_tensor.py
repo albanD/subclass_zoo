@@ -54,7 +54,7 @@ class PythonMetaTensorMode(torch.Tensor):
         if not any(isinstance(t, torch.Tensor) and t.is_meta for t in itertools.chain(flat_args, flat_kwargs)):
             return super().__torch_dispatch__(func, types, args, kwargs)
 
-        if func == torch.ops.aten._embedding_bag:
+        if func == torch.ops.aten._embedding_bag.default:
             # Defaults can be determined by reading native_functions.yaml
             # We will soon make these available directly from the torch.ops
             # API, waiting on https://github.com/pytorch/pytorch/pull/72673
@@ -76,7 +76,7 @@ class PythonMetaTensorMode(torch.Tensor):
             bag_size = offsets.new_empty(offsets.size())
             max_indices = offsets.new_empty(bag_size.size())
             return output, offset2bag, bag_size, max_indices
-        elif func == torch.ops.aten.index_select:
+        elif func == torch.ops.aten.index_select.default:
             # TODO: when I didn't have embedding implemented, it reported that
             # index_select wasn't implemented, but it didn't actually help to
             # implement this (because once we go to the
@@ -88,7 +88,7 @@ class PythonMetaTensorMode(torch.Tensor):
             if self.dim() > 0:
                 result_size[dim] = index.numel()
             return self.new_empty(result_size)
-        elif func == torch.ops.aten.embedding:
+        elif func == torch.ops.aten.embedding.default:
             args = fill_defaults(args, 5, [-1, False, False])
             weight, indices, padding_idx, scale_grad_by_freq, sparse = args
             assert not kwargs
