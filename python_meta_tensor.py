@@ -9,6 +9,32 @@ import torch.nn
 
 import itertools
 
+"""
+Meta tensors give you the ability to run PyTorch code without having to
+actually do the compute, which is useful if you only need to figure out what
+output sizes might be or need to trace a program. However, meta device support
+in PyTorch is somewhat spotty, as we have mostly gotten meta tensor support by
+porting kernels to structured kernels, which is a relatively time consuming
+process (although it ensures that our meta implementations are 100% correct,
+as they are derived from a single source of truth).
+
+With tensor subclasses, we can create a subclass of meta tensor,
+PythonMetaTensor, which manually adds support for missing meta device
+implementations. Indeed, we can even implement this as a mode, so that when a
+context manager is active, we interpose on all operations on meta tensors and
+override the behavior of some operations with our own implementations.
+
+I found it very pleasant and quick writing Python implementations for the meta
+functions; feedback was instantaneous without any C++ compilation cycle. These
+implementations could then be ported to C++ (short term), or removed entirely
+when the kernels in question turned structured (long term).
+
+Note that https://github.com/pytorch/pytorch/pull/62660 would have also had a
+similar effect, but at time of writing it is not landed in core, so I shipped
+the version using subclasses/modes instead.
+"""
+
+
 # TODO: duplicated from utils.py
 def fill_defaults(args, n, defaults_tail):
     """
