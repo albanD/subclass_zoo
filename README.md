@@ -22,7 +22,8 @@ TODO
 - Implement speculate and validate tensor
   https://docs.google.com/document/d/1s44XJg_AQFZbSm4X1u9bE6V2ELstFdlekA_m2lNWn1Y/edit#heading=h.5pt6253mfam1
 - CUDA sanitizer in Python (hard cuz no event hooks)
-- Sparse gradients / outputs per Christian (using modes)
+- Sparse gradients / outputs per Christian (using modes; gradients hard cuz
+  need torch function mode)
 - SSD tensor
 - Reimplement functionalization tensor
 - Nested tensor

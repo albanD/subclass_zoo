@@ -9,6 +9,10 @@ from utils import no_dispatch, tree_map2
 from types import FunctionType
 from base_tensor import BaseTensor
 
+# This is a reimplementation of Horace He's original
+# PythonTensor in functorch:
+# https://github.com/pytorch/functorch/blob/main/functorch/_src/python_key.py
+
 
 class TracerTensor(BaseTensor):
     __slots__ = ['proxy']
