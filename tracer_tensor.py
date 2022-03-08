@@ -114,24 +114,33 @@ class DispatchTracer(Tracer):
             nonlocal cnt
             cnt += 1
             return TracerTensor(arg, self.create_proxy('placeholder', f'arg_{str(cnt)}', (), {}))
-        args = tree_map(replace_tracer, concrete_args)
+        # TODO: generalize to tree_map (but this will make verifier_tensor
+        # harder to implement)
+        args = [replace_tracer(a) for a in concrete_args]
 
-        self.create_node('output', 'output', (self.create_arg(fn(*args).proxy),), {},
+        result = fn(*args)
+
+        self.create_node('output', 'output', (self.create_arg(result.proxy),), {},
                          type_expr=fn.__annotations__.get('return', None))
 
         self.submodule_paths = None
-        return self.graph
+        # TODO: better idiom for this
+        with no_dispatch():
+            unwrapped_result = result.view(result.shape)
+        return unwrapped_result, self.graph
 
 def dispatch_trace(root, concrete_args):
     tracer = DispatchTracer()
-    graph = tracer.trace(root, concrete_args)
+    result, graph = tracer.trace(root, concrete_args)
     name = root.__name__
-    return GraphModule(tracer.root, graph, name)
+    return result, GraphModule(tracer.root, graph, name)
 
 
 class TracerTensorTest(TestCase):
     def test_basic(self):
-        g = dispatch_trace(lambda x, y: x + y, (torch.ones(2), torch.ones(2)))
+        r, g = dispatch_trace(lambda x, y: x + y, (torch.ones(2), torch.ones(2)))
+        self.assertNotIsInstance(r, TracerTensor)
+        self.assertEqual(r, torch.tensor([2.0, 2.0]))
         self.assertExpectedInline(str(g.graph), """\
 graph():
     %arg_1 : [#users=1] = placeholder[target=arg_1]
