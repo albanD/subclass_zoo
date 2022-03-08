@@ -38,6 +38,11 @@ class InnerAutogradTensor(BaseTensor):
         def unwrap(t):
             if isinstance(t, cls):
                 return t.elem
+            elif isinstance(t, torch.Tensor) and t.requires_grad:
+                # If any other argument at this level does require gradients
+                # it will not interact with our inner Tensor and thus this
+                # should fail.
+                raise RuntimeError("Bad mixup of autograd level")
             else:
                 return t
 
@@ -93,22 +98,12 @@ class InnerAutogradTensorTest(TestCase):
         w2 = torch.randn(1, requires_grad=True)
 
         # Autograd doesn't "unwrap" variables, they still remember if they
-        # requires_grad; and in fact, inside __torch_function__ it is willing
-        # to mix gradients between multiple levels.  This can be very
-        # confusing so be careful!
-        x = InnerAutogradTensor(w1) + w2
-        g1, g2 = torch.autograd.grad(x.elem.sum(), (w1, w2))
-        self.assertEqual(g1, torch.ones(1))
-        self.assertEqual(g2, torch.ones(1))
-
-        # Hopefully this makes more sense: w1 doesn't require gradients from
-        # the outer context (due to InnerAutogradTensor), so it doesn't get
-        # a gradient here.  You could make it also have gradients by
-        # not detaching from __new__, but once again... very confusing.
-        x = InnerAutogradTensor(w1) + w2
-        g1, g2 = torch.autograd.grad(x.sum(), (w1, w2), allow_unused=True)
-        self.assertEqual(g1, None)
-        self.assertEqual(g2, torch.ones(1))
+        # requires_grad; and in fact, inside __torch_dispatch__ it is willing
+        # to mix gradients between multiple levels. The current class does
+        # catch most of these though when it is looking at the different
+        # arguments
+        with self.assertRaisesRegex(RuntimeError, "Bad mixup of autograd level"):
+            x = InnerAutogradTensor(w1) + w2
 
 if __name__ == '__main__':
     run_tests()
