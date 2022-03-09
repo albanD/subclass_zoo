@@ -9,14 +9,38 @@ from utils import no_dispatch, tree_map2
 from types import FunctionType
 from base_tensor import BaseTensor
 
-# This is a reimplementation of Horace He's original
-# PythonTensor in functorch:
-# https://github.com/pytorch/functorch/blob/main/functorch/_src/python_key.py
+"""
+TracerTensor is a tensor that traces ATen operations that are performed on it
+and writes the resulting trace to FX IR. We extracted this tracing
+implementation from Horace He's implementation for AOTAutograd
+(https://github.com/pytorch/functorch/blob/main/functorch/_src/python_key.py)
+to make it easier for you to see how it is put together. The basic
+implementation concept is simple: we run all tensor operations as normal, but
+on the side, we also duplicate the operations on FX Proxy objects, which are
+then responsible for writing in the results into FX IR. The top level tracing
+function dispatch_trace is a modified version of FX's `symbolic_trace`
+function: we always take a tuple of concrete Tensor inputs, and we generate
+placeholder proxies for all of them and attach them to TracerTensors which we
+actually feed into the model.
 
+Tracing with __torch_dispatch__ has some properties which are worth being
+aware of:
+
+  - It is able to trace through autograd and other PyTorch subsystems (as they
+    are all desugared into lower level calls by the time you get to
+    `__torch_dispatch__`. Composite operations (CompositeImplicitAutograd)
+    will be desugared by the time you get to trace.
+  - It produces FX IR with `torch.ops.aten` nodes (e.g., you will get
+    `torch.ops.aten.add.Tensor`, not merely `torch.add`)
+  - Unlike FX, it is not able to trace non-Tensor symbolic values (e.g.,
+    sizes); these are all specialized to particular ints by the time
+    `__torch_dispatch__` is called. Nick Korovaiko is working on removing this
+    limitation.
+  - In fact, you can think of it as a pure Python implementation of
+    torch.jit.trace, except that it outputs FX IR rather than TorchScript IR. 
+"""
 
 class TracerTensor(BaseTensor):
-    __slots__ = ['proxy']
-
     # We support autograd-ing through the TracerTensor (which you
     # really can think of as a good old fashioned tensor that also
     # takes a proxy along for the ride).  If you need to terminate
@@ -33,10 +57,6 @@ class TracerTensor(BaseTensor):
         # know exactly what its tensor metadata should be, so populate it
         proxy.node.meta['tensor_meta'] = _extract_tensor_metadata(self)
 
-    def __repr__(self):
-        with no_dispatch():
-            return f"TracerTensor({repr(self)})"
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         def unwrap_proxy(t):
@@ -46,21 +66,16 @@ class TracerTensor(BaseTensor):
                 return t
 
         def wrap(t, p):
-            # Some ops (like native_batch_norm_backward) return undefined
-            # tensor that get converted into None in Python.  This papers
-            # over this problem.
-            # TODO: fix this inside core so that None returns from
-            # __torch_dispatch__ turn into undefined tensors
-            if t is None:
-                return torch.empty(())
-            elif isinstance(t, Tensor):
-                return TracerTensor(t, p)
+            if isinstance(t, Tensor) and not isinstance(t, cls):
+                return cls(t, p)
             else:
                 assert t == p
                 return t
 
+        # Run the original computation
         r = super().__torch_dispatch__(func, types, args, kwargs)
 
+        # Run the computation on FX proxies to record it into graph
         r_proxy = func(
             *tree_map(unwrap_proxy, args),
             **tree_map(unwrap_proxy, kwargs))
@@ -80,10 +95,11 @@ class TracerTensor(BaseTensor):
 
 
 class DispatchTracer(Tracer):
-    # This is modeled off of Trace.trace but we don't need to monkeypatch
-    # anything because we will rely on __torch_dispatch__ to handle
-    # interposition.  Unlike standard FX, we don't want to trace leaf modules,
-    # we want to get a graph of entirely torch.ops.aten operations
+    # Our implementation here divergences a bit from Horace's.  This version
+    # modeled off of Trace.trace but we don't need to monkeypatch anything
+    # because we will rely on __torch_dispatch__ to handle interposition.
+    # Unlike standard FX, we don't want to trace leaf modules, we want to get
+    # a graph of entirely torch.ops.aten operations
     #
     # Unlike FX, the semantics for concrete_args is a little different.
     # Typically, if you FX trace a function, you leave concrete_args None
@@ -100,20 +116,20 @@ class DispatchTracer(Tracer):
 
         tracer_cls = getattr(self, '__class__', None)
         self.graph = Graph(tracer_cls=tracer_cls)
-        # No module, so tensor_attrs is always empty
+        # Don't support module, so tensor_attrs is always empty
         self.tensor_attrs = {}
         assert isinstance(fn, FunctionType)
 
         # Reimplementation of create_args_for_root, but this is pretty
-        # different as we need a blend of concrete/non-concrete behavior.
-        # PH is irrelevant.
-        # NB: Didn't bother handling functools wrappers
-        # TODO: add back argument name sniffing
+        # different as we always expect concrete arguments to be provided
+        # and we still generate placeholders for each of them.
         cnt = 0
         def replace_tracer(arg):
             nonlocal cnt
             cnt += 1
+            # TODO: add back argument name sniffing
             return TracerTensor(arg, self.create_proxy('placeholder', f'arg_{str(cnt)}', (), {}))
+
         # TODO: generalize to tree_map (but this will make verifier_tensor
         # harder to implement)
         args = [replace_tracer(a) for a in concrete_args]
@@ -124,6 +140,9 @@ class DispatchTracer(Tracer):
                          type_expr=fn.__annotations__.get('return', None))
 
         self.submodule_paths = None
+
+        # Unlike regular Tracer.trace, we also return the result as it
+        # contains useful data (the result of your computation)
         # TODO: better idiom for this
         with no_dispatch():
             unwrapped_result = result.view(result.shape)
