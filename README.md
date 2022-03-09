@@ -46,3 +46,12 @@ TODO
 - Nested tensor
 - Custom allocator mode (albanD)
 - Lazy tensor
+
+## Work plan
+
+* TODO: merge BaseTensor into Tensor
+  * TODO: torch function disable https://github.com/pytorch/pytorch/pull/73942
+* Get rid of `fill_defaults`
+
+* Compositionality
+  * TODO: suppress elem in init
