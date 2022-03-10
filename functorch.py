@@ -39,7 +39,7 @@ class WrapperTensor(BaseTensor):
             return cls._make_subclass(cls, elem)
 
     def __repr__(self):
-        return f"WrapperTensor({super().__repr__()}, {repr(self.elem)})"
+        return f"WrapperTensor{self.level}({super().__repr__()}, {repr(self.elem)})"
 
     def __init__(self, elem, level):
         self.elem = elem
@@ -58,18 +58,17 @@ class WrapperTensor(BaseTensor):
         tree_map(find_level, args)
         tree_map(find_level, kwargs)
 
+        def matches_level(t):
+            return isinstance(t, cls) and t.level == max_level
+
         def unwrap(t):
-            if isinstance(t, cls) and t.level == max_level:
+            if matches_level(t):
                 return t.elem
-            elif isinstance(t, torch.Tensor):
-                # implicitly lift to the current level
-                # TODO: hmm is this gonna copy everything?
-                return WrapperTensor(t, max_level)
             else:
                 return t
 
         def wrap(t):
-            if isinstance(t, Tensor) and not isinstance(t, cls):
+            if isinstance(t, Tensor) and not matches_level(t):
                 return cls(t, max_level)
             else:
                 return t
@@ -107,7 +106,7 @@ class FunctorchTest(TestCase):
     def test_grad_of_grad(self):
         x = torch.randn([])
         result = grad(grad(lambda x: x ** 3))(x)
-        self.assertEqual(result, 3 * x ** 2)
+        self.assertEqual(result, 6 * x)
 
 if __name__ == '__main__':
     run_tests()
