@@ -12,6 +12,8 @@ import contextlib
 from utils import no_dispatch
 from base_tensor import BaseTensor
 
+# TODO: batched tensor (metadata doesn't match, so this needs more APIs)
+
 LEVEL = 0
 
 @contextlib.contextmanager
@@ -32,9 +34,9 @@ def unwrap(t, level):
 class WrapperTensor(BaseTensor):
     @staticmethod
     def __new__(cls, elem, level):
-        # TODO: this is probably wrong for lifting batched
-        # tensor, but for autograd it's OK cuz it detaches
-        # TODO: no_dispatch here is wrong
+        # This is probably wrong for batched tensor, for autograd
+        # it's good because make_subclass internally detaches.
+        # no_dispatch is required to prevent detach form going to subclass.
         with no_dispatch():
             return cls._make_subclass(cls, elem)
 
