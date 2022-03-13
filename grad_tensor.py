@@ -134,7 +134,7 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
             # this map holds dL/dX for all values X
             dL_d : Dict[str, Tensor] = {}
             # It starts by initializing the 'seed' dL/dL, which is 1
-            dL_d[L.t_name] = self.backward_dispatch(lambda s: s.constant(torch.ones(())))
+            dL_d[L.t_name] = self.variable(torch.ones(()))
             print(f'{Autograd.__name__} d{L.t_name} ------------------------')
 
             # look up dL_dentries. If a variable is never used to compute the loss,
@@ -159,7 +159,7 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
                 # all the contributions together.
                 for input, dL_dinput in zip(entry.inputs, dL_dinputs):
                     if input not in dL_d:
-                        dL_d[input] = self.backward_dispatch(lambda s: s.add(s.constant(torch.zeros_like(dL_dinput)), dL_dinput))
+                        dL_d[input] = dL_dinput
                     else:
                         dL_d[input] = self.backward_dispatch(lambda s: s.add(dL_d[input], dL_dinput))
 
