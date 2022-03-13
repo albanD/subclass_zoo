@@ -5,8 +5,9 @@ from typing import List, NamedTuple, Callable, Dict, Optional
 """
 This is a remix of Zachary DeVito's Simple Autograd
 https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing
-to illustrate some concepts
-
+to illustrate some concepts on a few different ways you can
+write autograd.  To start, we replicate some data structures
+as is from the original colab.
 """
 
 class TapeEntry(NamedTuple):
@@ -16,6 +17,46 @@ class TapeEntry(NamedTuple):
     outputs: List[str]
     # apply chain rule
     propagate: Callable[List[Tensor], List[Tensor]]
+
+_name = 0
+
+def fresh_name() -> str:
+    """ create a new unique name for a variable: v0, v1, v2 """
+    global _name
+    r = f'v{_name}'
+    _name += 1
+    return r
+
+"""
+We won't make use of a Variable wrapper class; instead we are going to store
+our autograd tape with the autograd context itself.  For debuggability
+purposes, however, we still need a way to identify variables by a human
+readable name, and we'll do this by annotating them with a t_name attribute.
+"""
+
+def variable(t: Tensor, name: str=None):
+    if not hasattr(t, "t_name"):
+        t.t_name = name or fresh_name()
+    return t
+
+"""
+In this file, I wanted to demonstrate a few different ways of implementing
+autograd in the context of a dispatcher-style system, and to do that, I
+needed to organize my operator calls in a different way than you might be
+used to.  Instead of having a Variable wrapper class and defining methods
+on it, I will instead rely on a series of "dispatch layer" mixins which define
+a series of operations at a particular level in the dispatcher, and then
+I will mix them together (using Python multiple inheritance) to create a
+fully-featured applications.  Do not worry if you are not familiar with
+mixin-style programming, we will explain it as we go along.
+
+To start with, we will implement a backend dispatch layer Torch.  This just
+forwards on the operator calls to our underlying library PyTorch.  You could
+also imagine replacing this with a Numpy backend or even a pure Python variant
+(although this file is not currently setup to do so.)  Each operator is a
+method on the dispatch layer mixin, for reasons that will become apparent
+shortly.
+"""
 
 class Torch:
     def mul(self, lhs, rhs):
@@ -27,31 +68,24 @@ class Torch:
     def expand(self, input, sizes):
         return input.expand(*sizes)
 
-_name = 0
-
-def fresh_name() -> str:
-    """ create a new unique name for a variable: v0, v1, v2 """
-    global _name
-    r = f'v{_name}'
-    _name += 1
-    return r
-
-def variable(t: Tensor, name: str=None):
-    if not hasattr(t, "t_name"):
-        t.t_name = name or fresh_name()
-    return t
+"""
+Similar to the Torch mixin, the Autograd mixin will also define four
+methods (mul, add, sum, expand).  Intuitively, the idea is that we will
+first call into Autograd, autograd will do some stuff, and then
+delegate to Torch to do the actual compute.
+"""
 
 def gen_autograd(suffix="", *, backward_super: bool = False):
     class Autograd:
+        def __init__(self):
+            super().__init__()
+            Autograd.set_gradient_tape(self, [])
+
         def get_gradient_tape(self):
             return getattr(self, f"gradient_tape_{Autograd.__name__}")
         def set_gradient_tape(self, x):
             return setattr(self, f"gradient_tape_{Autograd.__name__}", x)
         gradient_tape = property(get_gradient_tape, set_gradient_tape)
-
-        def __init__(self):
-            super().__init__()
-            Autograd.set_gradient_tape(self, [])
 
         def backward_dispatch(self, cb):
             if backward_super:
@@ -136,6 +170,7 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
             # this map holds dL/dX for all values X
             dL_d : Dict[str, Tensor] = {}
             # It starts by initializing the 'seed' dL/dL, which is 1
+            # TODO: indirect this via the backend
             dL_d[L.t_name] = variable(torch.ones(()))
             print(f'{Autograd.__name__} d{L.t_name} ------------------------')
 
@@ -180,6 +215,7 @@ Autograd = gen_autograd()
 # expand is the backward of sum, so it is added to make sure our Variable
 # is closed under differentiation. Both have rules similar to mul above.
 
+# TODO: indirect this via the backend
 torch.manual_seed(0)
 a, b = variable(torch.rand(4)), variable(torch.rand(4))
 
