@@ -75,6 +75,16 @@ first call into Autograd, autograd will do some stuff, and then
 delegate to Torch to do the actual compute.
 """
 
+class Delegate:
+    def __init__(self, cls, obj):
+        self._delegate_cls = cls
+        self._delegate_obj = obj
+    def __getattr__(self, name):
+        x = getattr(self._delegate_cls, name)
+        if hasattr(x, "__get__"):
+            return x.__get__(self._delegate_obj)
+        return x
+
 def gen_autograd(suffix="", *, backward_super: bool = False):
     class Autograd:
         def __init__(self):
@@ -91,7 +101,8 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
             if backward_super:
                 return variable(cb(super()))
             else:
-                return cb(self)
+                return cb(Delegate(Autograd, self))
+                #return cb(self)
 
         def mul(self, lhs, rhs):
             if isinstance(rhs, float) and rhs == 1.0:
@@ -164,7 +175,6 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
 
         def reset_tape(self):
             Autograd.get_gradient_tape(self).clear()
-            self._name = 0 # reset variable names too to keep them small.
 
         def grad(self, L, desired_results: List[Tensor]) -> List[Tensor]:
             # this map holds dL/dX for all values X
@@ -230,7 +240,7 @@ class Example1(Autograd, Torch):
         print("da", da)
         print("db", db)
 
-#Example1().main()
+Example1().main()
 
 class Example2Direct(Autograd, Torch):
     def simple(self, a, b):
@@ -292,3 +302,32 @@ class Example2Indirect(Autograd2, Autograd1, Torch):
         print("db", db)
 
 Example2Indirect().main()
+
+# Autograd2, Batched, Autograd1
+# Autograd2 will record a tape with batched tensors
+# Autograd1 will record a tape with raw tensors
+# Autograd1 tape is not usable for Autograd2 (vmap(grad(...))) case, as
+# losses are expected to come out batched but you'll get out raw tensors
+# Autograd2 tape could work, but the type is "wrong" and you need
+# to unwrap them
+#
+# Does Batched have to actually wrap? If everything was virtualized,
+# not actually; batched layer can simply "reinterpret" size query
+# appropriately
+#
+# New idea: don't wrap tensors, instead wrap "dispatcher levels" in Python.
+# One object instead of many.
+#   ~ how to reuse the old objects? "Phantom" tensors organized by the
+#   instance (need weakrefs...)
+#   ~ this is the old "levels subsume everything" idea (dropped because
+#   we wanted nonlexical--but nonlexical just implies determining the
+#   dispatch list from some other context)
+#
+# Wrapping is very natural for users.  Still OK: single wrapper tensor,
+# solve by internal dispatch mechanism.  Don't use super for compositional.
+#
+# Is there still a place for OO/multiple inheritance/MRO/super cooperative?
+# Traditional OO/mixin style programming, with self footgun (extra
+# expressivity typically not what you want).  Mixin can be converted into
+# level but there isn't really any reason to do it.  Natively interoperates
+# with traditional object dispatch.
