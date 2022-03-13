@@ -2,6 +2,13 @@ import torch
 from torch import Tensor
 from typing import List, NamedTuple, Callable, Dict, Optional
 
+"""
+This is a remix of Zachary DeVito's Simple Autograd
+https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing
+to illustrate some concepts
+
+"""
+
 class TapeEntry(NamedTuple):
     # names of the inputs to the original computation
     inputs : List[str]
@@ -20,14 +27,22 @@ class Torch:
     def expand(self, input, sizes):
         return input.expand(*sizes)
 
+_name = 0
+
+def fresh_name() -> str:
+    """ create a new unique name for a variable: v0, v1, v2 """
+    global _name
+    r = f'v{_name}'
+    _name += 1
+    return r
+
+def variable(t: Tensor, name: str=None):
+    if not hasattr(t, "t_name"):
+        t.t_name = name or fresh_name()
+    return t
+
 def gen_autograd(suffix="", *, backward_super: bool = False):
     class Autograd:
-        def get__name(self):
-            return getattr(self, f"_name_{Autograd.__name__}")
-        def set__name(self, x):
-            return setattr(self, f"_name_{Autograd.__name__}", x)
-        _name = property(get__name, set__name)
-
         def get_gradient_tape(self):
             return getattr(self, f"gradient_tape_{Autograd.__name__}")
         def set_gradient_tape(self, x):
@@ -35,29 +50,12 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
         gradient_tape = property(get_gradient_tape, set_gradient_tape)
 
         def __init__(self):
-            self._name = 0
-            self.gradient_tape = []
-
-        def fresh_name(self) -> str:
-            """ create a new unique name for a variable: v0, v1, v2 """
-            r = f'v{self._name}'
-            self._name += 1
-            return r
-
-        def variable(self, t: Tensor, name: str=None):
-            #t = t.detach()
-            if not hasattr(t, "t_name"):
-                t.t_name = name or self.fresh_name()
-            return t
-
-        def constant(self, value: torch.Tensor, name: str=None):
-            r = self.variable(value, name)
-            print(f'{Autograd.__name__} {r.t_name} = {value}')
-            return r
+            super().__init__()
+            Autograd.set_gradient_tape(self, [])
 
         def backward_dispatch(self, cb):
             if backward_super:
-                return self.variable(cb(super()))
+                return variable(cb(super()))
             else:
                 return cb(self)
 
@@ -67,7 +65,7 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
                 return lhs
 
             # define forward
-            r = self.variable(super().mul(lhs, rhs))
+            r = variable(super().mul(lhs, rhs))
             print(f'{Autograd.__name__} {r.t_name} = {lhs.t_name} * {rhs.t_name}')
 
             # record what the inputs and outputs of the op were
@@ -83,58 +81,62 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
 
                 # chain rule propagation from outputs to inputs of multiply
                 # self or Autograd???
-                dL_dlhs = self.backward_dispatch(lambda s: s.mul(dL_dr, dr_dlhs))
-                dL_drhs = self.backward_dispatch(lambda s: s.mul(dL_dr, dr_drhs))
+                dL_dlhs = Autograd.backward_dispatch(self, lambda s: s.mul(dL_dr, dr_dlhs))
+                dL_drhs = Autograd.backward_dispatch(self, lambda s: s.mul(dL_dr, dr_drhs))
                 dL_dinputs = [dL_dlhs, dL_drhs]
                 return dL_dinputs
             # finally, we record the compute we did on the tape
-            self.gradient_tape.append(TapeEntry(inputs=inputs, outputs=outputs, propagate=propagate))
+            Autograd.get_gradient_tape(self).append(
+                TapeEntry(inputs=inputs, outputs=outputs, propagate=propagate))
             return r
 
         def add(self, lhs, rhs):
             # Add follows a similar pattern to Mul, but it doesn't end up
             # capturing any variables.
-            r = self.variable(super().add(lhs, rhs))
+            r = variable(super().add(lhs, rhs))
             print(f'{Autograd.__name__} {r.t_name} = {lhs.t_name} + {rhs.t_name}')
             def propagate(dL_doutputs: List[Tensor]):
                 dL_dr, = dL_doutputs
                 dr_dlhs = 1.0
                 dr_drhs = 1.0
-                dL_dlhs = self.backward_dispatch(lambda s: s.mul(dL_dr, dr_dlhs))
-                dL_drhs = self.backward_dispatch(lambda s: s.mul(dL_dr, dr_drhs))
+                dL_dlhs = Autograd.backward_dispatch(self, lambda s: s.mul(dL_dr, dr_dlhs))
+                dL_drhs = Autograd.backward_dispatch(self, lambda s: s.mul(dL_dr, dr_drhs))
                 return [dL_dlhs, dL_drhs]
-            self.gradient_tape.append(TapeEntry(inputs=[lhs.t_name, rhs.t_name], outputs=[r.t_name], propagate=propagate))
+            Autograd.get_gradient_tape(self).append(
+                TapeEntry(inputs=[lhs.t_name, rhs.t_name], outputs=[r.t_name], propagate=propagate))
             return r
 
         def sum(self, input: Tensor, name: Optional[str]=None):
-            r = self.variable(super().sum(input), name=name)
+            r = variable(super().sum(input), name=name)
             print(f'{Autograd.__name__} {r.t_name} = {input.t_name}.sum()')
             def propagate(dL_doutputs: List[Tensor]):
                 dL_dr, = dL_doutputs
                 size = input.size()
-                return [self.backward_dispatch(lambda s: s.expand(dL_dr, size))]
-            self.gradient_tape.append(TapeEntry(inputs=[input.t_name], outputs=[r.t_name], propagate=propagate))
+                return [Autograd.backward_dispatch(self, lambda s: s.expand(dL_dr, size))]
+            Autograd.get_gradient_tape(self).append(
+                TapeEntry(inputs=[input.t_name], outputs=[r.t_name], propagate=propagate))
             return r
 
         def expand(self, input: Tensor, sizes: List[int]):
             assert(input.dim() == 0) # only works for scalars
-            r = self.variable(super().expand(input, sizes))
+            r = variable(super().expand(input, sizes))
             print(f'{Autograd.__name__} {r.t_name} = {input.t_name}.expand({sizes})')
             def propagate(dL_doutputs: List[Tensor]):
                 dL_dr, = dL_doutputs
-                return [self.backward_dispatch(lambda s: s.sum(dL_dr))]
-            self.gradient_tape.append(TapeEntry(inputs=[input.t_name], outputs=[r.t_name], propagate=propagate))
+                return [Autograd.backward_dispatch(self, lambda s: s.sum(dL_dr))]
+            Autograd.get_gradient_tape(self).append(
+                TapeEntry(inputs=[input.t_name], outputs=[r.t_name], propagate=propagate))
             return r
 
         def reset_tape(self):
-            self.gradient_tape.clear()
+            Autograd.get_gradient_tape(self).clear()
             self._name = 0 # reset variable names too to keep them small.
 
         def grad(self, L, desired_results: List[Tensor]) -> List[Tensor]:
             # this map holds dL/dX for all values X
             dL_d : Dict[str, Tensor] = {}
             # It starts by initializing the 'seed' dL/dL, which is 1
-            dL_d[L.t_name] = self.variable(torch.ones(()))
+            dL_d[L.t_name] = variable(torch.ones(()))
             print(f'{Autograd.__name__} d{L.t_name} ------------------------')
 
             # look up dL_dentries. If a variable is never used to compute the loss,
@@ -143,7 +145,7 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
                 return [dL_d[entry] if entry in dL_d else None for entry in entries]
 
             # propagate the gradient information backward
-            for entry in reversed(self.gradient_tape):
+            for entry in reversed(Autograd.get_gradient_tape(self)):
                 dL_doutputs = gather_grad(entry.outputs)
                 if all(dL_doutput is None for dL_doutput in dL_doutputs):
                     # optimize for the case where some gradient pathways are zero. See
@@ -161,7 +163,7 @@ def gen_autograd(suffix="", *, backward_super: bool = False):
                     if input not in dL_d:
                         dL_d[input] = dL_dinput
                     else:
-                        dL_d[input] = self.backward_dispatch(lambda s: s.add(dL_d[input], dL_dinput))
+                        dL_d[input] = Autograd.backward_dispatch(self, lambda s: s.add(dL_d[input], dL_dinput))
 
             # print some information to understand the values of each intermediate 
             for name, value in dL_d.items():
@@ -179,7 +181,7 @@ Autograd = gen_autograd()
 # is closed under differentiation. Both have rules similar to mul above.
 
 torch.manual_seed(0)
-a_global, b_global = torch.rand(4), torch.rand(4)
+a, b = variable(torch.rand(4)), variable(torch.rand(4))
 
 class Example1(Autograd, Torch):
     def simple(self, a, b):
@@ -187,8 +189,6 @@ class Example1(Autograd, Torch):
         return self.mul(t, b)
 
     def main(self):
-        a = self.variable(a_global, name='a')
-        b = self.variable(b_global, name='b')
         loss = self.simple(a, b)
         da, db = self.grad(loss, [a, b])
         print("da", da)
@@ -202,9 +202,6 @@ class Example2Direct(Autograd, Torch):
         return self.mul(t, b)
 
     def run_gradients(self):
-        a = self.variable(a_global, name='a')
-        b = self.variable(b_global, name='b')
-
         # our first loss
         L0 = self.sum(self.simple(a, b), name='L0')
 
@@ -224,7 +221,7 @@ class Example2Direct(Autograd, Torch):
         print("da", da)
         print("db", db)
 
-#Example2Direct().main()
+Example2Direct().main()
 
 Autograd1 = gen_autograd("1", backward_super=True)
 Autograd2 = gen_autograd("2", backward_super=True)
@@ -239,14 +236,8 @@ class Example2Indirect(Autograd2, Autograd1, Torch):
         #   we first allocate variables for the outer grad (Autograd1)
         #   then they get wrapped in variables again for inner grad (Autograd2)
 
-        a1 = Autograd1.variable(self, a_global, name='a1')
-        b1 = Autograd1.variable(self, b_global, name='b1')
-
-        a2 = Autograd2.variable(self, a1, name='a2')
-        b2 = Autograd2.variable(self, b1, name='b2')
-
-        L0 = Autograd2.sum(self, self.simple(Autograd2, a2, b2), name='L0')
-        dL0_da, dL0_db = Autograd2.grad(self, L0, [a2, b2])
+        L0 = Autograd2.sum(self, self.simple(Autograd2, a, b), name='L0')
+        dL0_da, dL0_db = Autograd2.grad(self, L0, [a, b])
 
         # Now we can "throw out" the tape for Autograd2
         Autograd2.reset_tape(self)
@@ -256,7 +247,7 @@ class Example2Indirect(Autograd2, Autograd1, Torch):
 
         # and take the gradient of that.
         # notice there are two losses involved.
-        dL1_da, dL1_db = Autograd1.grad(self, L1, [a1, b1])
+        dL1_da, dL1_db = Autograd1.grad(self, L1, [a, b])
         return dL1_da, dL1_db
 
     def main(self):
