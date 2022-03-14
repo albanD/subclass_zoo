@@ -42,6 +42,9 @@
 import torch
 from torch import Tensor
 from typing import List, NamedTuple, Callable, Dict, Optional
+import contextlib
+import functools
+from dataclasses import dataclass
 
 
 class TapeEntry(NamedTuple):
@@ -118,6 +121,8 @@ def label(t: Tensor, name: str = None):
 
 
 class Dispatcher:
+    inner = None
+
     def mul(self, lhs, rhs):
         raise NotImplementedError
 
@@ -140,11 +145,16 @@ class Dispatcher:
         raise NotImplementedError
 
     # ...and we also need to overload the meaning of size/ones to
-    # hide/reinsert batch dimensions
+    # hide/reinsert batch dimensions.  We also introduce a concept
+    # of "lifting" a tensor to be batched by broadcasting it on
+    # a dimension
     def size(self, input):
         raise NotImplementedError
 
     def ones(self, size):
+        raise NotImplementedError
+
+    def lift(self, input, d):
         raise NotImplementedError
 
     # For convenience, we provide dim, which just returns the length of
@@ -184,10 +194,15 @@ class Torch(Dispatcher):
 
     def size(self, input):
         # Return size a tuple for marginally more compact printing
+        assert isinstance(input, torch.Tensor)
         return tuple(input.size())
 
     def ones(self, size):
         return label(torch.ones(size))
+
+    def lift(self, input, d):
+        assert d is self
+        return input
 
 
 # Dispatcher layers are composable via object composition: we can
@@ -249,6 +264,11 @@ class Logger(Dispatcher):
             f"{self.name} {r.t_name}: {self.size(r)} = {input.t_name}.expand({sizes})"
         )
         return r
+
+    def lift(self, input, d):
+        if d is self:
+            return input
+        return self.inner.lift(input, d)
 
 
 # Here is a simple example of using Logger and Torch together.  Whenever
@@ -437,6 +457,11 @@ class Autograd(Dispatcher):
 
     def ones(self, size):
         return self.inner.ones(size)
+
+    def lift(self, input, d):
+        if d is self:
+            return input
+        return self.inner.lift(input, d)
 
     def grad(self, L, desired_results: List[Tensor]) -> List[Tensor]:
         # this map holds dL/dX for all values X
@@ -638,6 +663,19 @@ class Batched(Dispatcher):
         assert self.inner.size(input)[0] == self.length
         return self.inner.unsqueeze(input, dim + 1)
 
+    # The lift operation takes a tensor associated with some inner
+    # dispatcher, and "lifts" it so that it is interpreted neutrally
+    # for the outer dispatcher.  For most dispatchers this is trivial,
+    # but for batched tensor it is not: given a tensor x, to interpret
+    # it as x under the Batching dispatcher, we have to expand it so
+    # that it is broadcasted along its first dimension.
+    def lift(self, input, d):
+        if d is self:
+            return input
+        b_input = self.inner.unsqueeze(input, 0)
+        b_input = self.inner.expand(b_input, (self.length,) + self.inner.size(input))
+        return self.inner.lift(b_input, d)
+
 
 # +
 # Our inputs are batched this time!
@@ -715,15 +753,283 @@ print("dvb", dvb)
 
 # OK, so all of this dispatcher business is all nice and explicit, but
 # that's not what JAX/functorch's interface looks like.  How do we
-# bridge the gap?
+# bridge the gap?  Our first problem is heving to explicitly thread
+# our Dispatcher object everywhere.  In functorch, we instead implicitly
+# have a "current mode" which changes when you enter a grad() or vmap()
+# function.  So let's maintain global current dispatcher, and a way to
+# change what the current dispatcher is.  You can think of this as a
+# singly-linked stack of dispatchers which we push and pop dispatchers
+# onto.
+
+# +
+DISPATCHER = Torch()
+
+
+@contextlib.contextmanager
+def dispatcher(d):
+    global DISPATCHER
+    old_d = DISPATCHER
+    DISPATCHER = d
+    try:
+        yield
+    finally:
+        DISPATCHER = old_d
+
+
+# -
+
+# A dispatcher mode, however, is not enough.  Remember that in our
+# implementation of Batched, we blindly assumed that all tensors were
+# batched, even if this did not necessarily make sense.  If I have
+# `vmap(lambda bx: bx + y)(x)`, with `x: (B,X)` and `y: (X,)`, the
+# underlying operation should broadcast y to `(B,X)` and then do the
+# addition with x (bx advertises that it has size `(X,)` inside of the
+# vmap'd lambda).  To know this should happen, it is necessary for
+# us to know that y is not a batched tensor, but x is a batched tensor.
+# We'll resolve this with a wrapper class called FuncTensor, which
+# records both the underlying Tensor, as well as the Dispatcher which
+# this tensor is associated with.  In the above example, `bx.dispatcher`
+# might be `Batched(Torch())`, whereas `x.dispatcher` is `Torch()`.
 #
-# TODO: write this
+# So our general strategy is as follows:
+#   1. Every tensor is associated with a dispatcher
+#   2. You can lift tensors to dispatchers which wrap them (which can
+#      trigger some operations, like expand for Batched); this is
+#      implemented by `dispatcher_wraps`
+#   3. To perform an operation between to tensors, lift them so that
+#      they all have the same dispatcher, then do the operation on
+#      that dispatcher.
+
+# +
+# A dispatcher d1 wraps another dispatcher d2 if d2 is an ancestor of
+# d1 in the tree structure.  We've defined this relation to be
+# reflexive, in the same way issubclass(A, A) == True.
+def dispatcher_wraps(d1, d2):
+    # Treat this as a reflexive relation
+    if d1 is d2:
+        return True
+    while d1.inner is not None:
+        d1 = d1.inner
+        if d1 is d2:
+            return True
+    return False
 
 
+# Given a list of arguments, lift them all up to a common dispatcher
+# level, returning that dispatcher as well as the lifted arguments.
+# Note that the global current DISPATCHER is also accounted for!
+# In autodidax, this is `find_top_trace`.
+def lift_and_unwrap_args(*args):
+    outermost = DISPATCHER
+    for a in args:
+        if dispatcher_wraps(outermost, a.dispatcher):
+            pass
+        elif dispatcher_wraps(a.dispatcher, outermost):
+            # You can make this case an error as well if you don't
+            # want to support non-lexical functorch tensors
+            outermost = a.dispatcher
+        else:
+            raise TypeError("incompatible dispatcher trees")
+    return (outermost,) + tuple(a.lift(outermost).tensor for a in args)
 
-# Epilogue: Why didn't I use inheritance?  In fact, in the first version
-# of this notebook, I did.  But self makes it easy to accidentally go
-# back to the "top" of the dispatch stack, which is typically not what
-# you want.
 
-print("All done")
+# -
+
+
+# The actual implementation of the wrapper tensor which tracks the
+# Dispatcher for a tensor
+
+
+@dataclass
+class FuncTensor:
+    tensor: Tensor
+    dispatcher: Dispatcher
+
+    # Lift a FuncTensor to an outer dispatcher
+    def lift(self, d):
+        # You can only lift to a dispatcher which wraps the dispatcher
+        # this FuncTensor is associated with (not vice versa, or between
+        # unrelated FuncTensors).
+        assert dispatcher_wraps(d, self.dispatcher)
+        return FuncTensor(d.lift(self.tensor, self.dispatcher), d)
+
+    # The general strategy for any operation performed on a tensor, we
+    # lift all the arguments so that they live on the same dispatcher
+    # level, and then perform the operation on that dispatcher.  The
+    # resulting tensor is tagged at whatever dispatcher we had run the
+    # tensor on.
+    def __mul__(self, other):
+        d, self, other = lift_and_unwrap_args(self, other)
+        return FuncTensor(d.mul(self, other), d)
+
+    def __add__(self, other):
+        d, self, other = lift_and_unwrap_args(self, other)
+        return FuncTensor(d.add(self, other), d)
+
+    def sum(self, dim=None, name=None):
+        d, self = lift_and_unwrap_args(self)
+        return FuncTensor(d.sum(self, dim, name=name), d)
+
+    def expand(self, sizes):
+        d, self = lift_and_unwrap_args(self)
+        return FuncTensor(d.expand(self, sizes), d)
+
+    def unsqueeze(self, dim):
+        d, self = lift_and_unwrap_args(self)
+        return FuncTensor(d.unsqueeze(self, dim), d)
+
+    def squeeze(self, dim):
+        d, self = lift_and_unwrap_args(self)
+        return FuncTensor(d.squeeze(self, dim), d)
+
+    def size(self):
+        d, self = lift_and_unwrap_args(self)
+        return d.size(self)
+
+    def dim(self):
+        d, self = lift_and_unwrap_args(self)
+        return d.size(self)
+
+    # Factory functions like ones do not have any Tensor arguments,
+    # so they rely solely on the ambient DISPATCHER to determine
+    # what their semantics should be
+    @staticmethod
+    def ones(size):
+        d = lift_and_unwrap_args()
+        return d.ones(size)
+
+
+# Now we are ready to implement grad.  First, we need some helper
+# functions.
+
+# +
+# When we are done doing a vmap/grad, we need to take the results and
+# lower them back to a lower dispatcher on the stack (this is always
+# a no-op, in particular, in the vmap case, when we exit vmap the user
+# gets to see the batched dimension again.)
+def unlift(t, d):
+    if isinstance(t, list):
+        return [unlift(x, d) for x in t]
+    elif isinstance(t, tuple):
+        return tuple(unlift(x, d) for x in t)
+    else:
+        if t.dispatcher is d:
+            return t
+        return unlift(FuncTensor(t.tensor, t.dispatcher.inner), d)
+
+
+# This lets us easily pick out arguments as specified by argnums
+def filter_argnums(args, argnums):
+    if isinstance(argnums, int):
+        return (args[argnums],)
+    else:
+        return tuple(args[i] for i in argnums)
+
+
+# -
+
+# Now grad and vmap!
+
+# For simplicity, these functions only take tuples, not pytrees
+def grad(f, argnums=0):
+    @functools.wraps(f)
+    def wrapped_f(*args):
+        # We first lift and unwrap all of the arguments which we want
+        # to pass into the function
+        old_d, *args = lift_and_unwrap_args(*args)
+        d = Autograd(old_d)
+        with dispatcher(d):
+            # We pass in the functions at the new Autograd level (they
+            # were lifted to old_d, and lifting to d is a noop)
+            L = f(*(FuncTensor(a, d) for a in args))
+            assert L.dispatcher is d
+            # Run the autograd pass, getting the grads for the inputs
+            # as specified by argnums
+            grads = d.grad(L.tensor, filter_argnums(args, argnums))
+            # Finally, construct the grads at the lower level and return
+            # them
+            return [FuncTensor(r, old_d) for r in grads]
+
+    return wrapped_f
+
+
+def vmap(f):
+    @functools.wraps(f)
+    def wrapped_f(*args):
+        # cannot vmap over no arguments as this function uses the
+        # arguments to determine how large the batch dimension is
+        # (hypothetically, you could explicitly pass in the batch
+        # size, and then use this to control factory functions;
+        # JAX doesn't seem to have a knob to do this)
+        assert args
+        old_d, *args = lift_and_unwrap_args(*args)
+        d = Batched(old_d, length=args[0].size()[0])
+        for a in args:
+            assert a.size()[0] == d.length
+        with dispatcher(d):
+            # Rewrap all the arguments as batched tensors, then
+            # unwrap any batched tensors that escape
+            return unlift(f(*(FuncTensor(a, d) for a in args)), old_d)
+
+    return wrapped_f
+
+
+# Now we can rerun our example using the high level grad/vmap functions!
+
+# +
+def simple(a, b):
+    t = a + b
+    return t * b
+
+
+def L0(a, b):
+    return simple(a, b).sum()
+
+
+def L1(a, b):
+    dL0_da, dL0_db = vmap(grad(L0, argnums=(0, 1)))(a, b)
+    return (dL0_da * dL0_da + dL0_db * dL0_db).sum()
+
+
+fva = FuncTensor(va, DISPATCHER)
+fvb = FuncTensor(vb, DISPATCHER)
+dva, dvb = grad(L1, argnums=(0, 1))(fva, fvb)
+print("dva", dva)
+print("dvb", dvb)
+
+
+# -
+
+# Because FuncTensors are associated with the ambient dispatcher they
+# were created from, they are also allowed to escape from the context in
+# which they were defined, allowing for non-lexical, imperative
+# transform API.  For example, batching over module parameters is
+# problematic today.
+
+# +
+class ScaleBiasModule:
+    weight: FuncTensor
+    bias: FuncTensor
+
+    def __init__(self, N):
+        self.weight = FuncTensor(torch.randn(N), DISPATCHER)
+        self.bias = FuncTensor(torch.randn(N), DISPATCHER)
+
+    def forward(self, input):
+        return self.weight * input + self.bias
+
+
+top = DISPATCHER
+B = 2
+N = 3
+batched = Batched(top, length=B)
+m = ScaleBiasModule(N)
+# Ensemble weights only; input is not batched
+m.weight = FuncTensor(torch.randn(B, N), batched)
+input = FuncTensor(torch.randn(N), top)
+with dispatcher(batched):
+    output = m.forward(input)
+print(
+    "expect", input.tensor.unsqueeze(0) * m.weight.tensor + m.bias.tensor.unsqueeze(0)
+)
+print("output", output.tensor)
