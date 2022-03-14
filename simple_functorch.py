@@ -1,13 +1,14 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:light
 #     text_representation:
 #       extension: .py
 #       format_name: light
-#       format_version: '1.4'
-#       jupytext_version: 1.1.0
+#       format_version: '1.5'
+#       jupytext_version: 1.13.7
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
@@ -44,7 +45,7 @@ class TapeEntry(NamedTuple):
     # names of the outputs of the original computation
     outputs: List[str]
     # apply chain rule
-    propagate: Callable[List[Tensor], List[Tensor]]
+    propagate: Callable[[List[Tensor]], List[Tensor]]
 
 
 _name = 0
