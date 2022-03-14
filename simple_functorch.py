@@ -13,23 +13,28 @@
 #     name: python3
 # ---
 
-# This file compares PyTorch's implementation of double backwards (which shares
-# the same tape through multiple levels of differentiation) with a JAX-style
-# nested grad implementation (which maintains a separate tape per level).
-# The goals of this file are:
+# This notebook walks through a self-contained implementation of
+# functorch, including support for both vjp and vmap combinators (using
+# PyTorch only to implement primitive tensor operations).  It follows
+# the tradition of
+# [Autodidax](https://jax.readthedocs.io/en/latest/autodidax.html) (a
+# pedagogical reimplementation of JAX, the library functorch is inspired
+# by) and [Simple
+# Autograd](https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing)
+# (Zachary Devito's pedagogical reimplementation of autograd, which the
+# autograd system in this notebook is based off of.) You can [open this
+# file in
+# Colab](https://colab.research.google.com/github/albanD/subclass_zoo/blob/main/simple_functorch.ipynb)
+# and play around with the examples.
 #
-# 1. To make you aware of this difference in tape representation
-# 2. To explain under what situations PyTorch's optimization is valid (grad-grad
-#    versus grad-vmap-grad)
-# 3. To describe a simple composition mechanism for eager mode JAX-style
-#    transformations, eschewing the traditional "wrapper tensors" by having
-#    a single hierarchy of dispatcher objects which forward each other.
-#
-# The autograd implementation and examples are directly cribbed from Zachary
-# DeVito's Simple Autograd at
-# https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing
-# Like in Zach's colab, we do not use PyTorch's autograd system at all.
-#
+# As a simplified implementation of functorch, this notebook also makes
+# it easier to investigate some more subtle aspects of how PyTorch's
+# native autograd system interacts with composable transforms.  In
+# particular, we will see that PyTorch's native implementation of double
+# backwards (which shares the same tape through multiple levels of
+# differentiation) differs from functorch's nested grad implementation
+# (which maintains a separate tape per level).
+
 # To get started, we replicate some of the data structures and helper functions
 # from Simple Autograd.
 
@@ -59,91 +64,139 @@ def fresh_name() -> str:
     return r
 
 
-def _dim_set(max_dim, d):
-    if d is None:
-        return tuple(range(0, max_dim))
-    elif isinstance(d, int):
-        return (d,)
-    else:
-        return tuple(sorted(d))
-
-
 # -
 
-# Unlike Simple Autograd, we won't make use of a Variable wrapper class.  For
-# debuggability purposes, however, we still need a way to identify variables by
-# a human readable name, and we'll do this by directly setting a t_name
-# attribute on them.  variable will be called whenever we directly allocate
-# a new tensor from PyTorch.
+# This is a little helper function for converting the dim argument in
+# sum into an explicit list of dimensions that will be reduced over.
+# It takes the dim of the tensor we are summing over and the dim
+# argument itself.
 
 
-def variable(t: Tensor, name: str = None):
+def sum_dims(*, input_dim, dim):
+    if dim is None:
+        return tuple(range(0, input_dim))
+    elif isinstance(dim, int):
+        return (dim,)
+    else:
+        return tuple(sorted(dim))
+
+
+# In Simple Autograd, we provided a Variable wrapper class which
+# provided a traditional Tensor style interface for our objects; in
+# functorch proper, objects are repeatedly wrapped in this way to
+# implement multipler layers of transformations.
+#
+# In my opinion, this sort of wrapper makes it more difficult to
+# understand the flow of logic.  So in Simple Functorch, we take a
+# different approach: we won't make use of a wrapper class at all,
+# instead showing how to add it in the end as syntax sugar on top of our
+# system.
+#
+# For debuggability purposes, however, it is nice to have a way to
+# identify variables by a human readable name.  We'll do this by setting
+# a t_name attribute on PyTorch tensors whenever we allocate a new
+# tensor.
+
+
+def label(t: Tensor, name: str = None):
     if not hasattr(t, "t_name"):
         t.t_name = name or fresh_name()
     return t
 
 
-# Instead of having a wrapper around each tensor individually, we will instead
-# have a separate object, a Dispatcher object, which actually implements the
-# supported operations on a tensor as a method that explicitly takes all the
-# tensors as arguments.  If you are familiar with the history of ATen, the
-# original implementation of ATen, these correspond to the
-# CPUType/CUDAType/VariableType objects from that implementation (this was
-# replaced with the modern dispatcher as the original vtable-based
-# implementation did not support adding custom operators.)
-#
-# To start with, we will implement a backend dispatch layer Torch.  This just
-# forwards on the operator calls to our underlying library PyTorch (and ensures
-# that all the allocated tensors are labeled).  You could also imagine replacing
-# this with a Numpy backend or even a pure Python variant (although this file is
-# not currently setup to do so.)
+# So if we aren't going to have a wrapper around each tensor, how will
+# we actually implement our logic?  We will organize our various layers
+# of transformations as separate Dispatcher objects, which define
+# methods for performing operations on tensors, but are not Tensors
+# themselves.  For example, instead of defining Tensor.add(Tensor), we
+# will define Dispatcher.add(Tensor, Tensor).  If you are familiar with
+# historical ATen, in the original implementation of ATen, these
+# correspond to the CPUType/CUDAType/VariableType objects from that
+# implementation (this was replaced with the modern dispatcher as the
+# original vtable-based implementation did not support adding custom
+# operators.)
 
-# This is a little helper class that just defines dim in terms of size for
-# convenience.  All of our dispatchers will inherit from it.
+
 class Dispatcher:
-    def dim(self, input):
-        return len(self.size(input))
-
-    # We could insert abstract methods for all the operations we expect here
-
-
-class Torch(Dispatcher):
-    # Here are the original four operators which were in Simple Autograd
     def mul(self, lhs, rhs):
-        return variable(torch.mul(lhs, rhs))
+        raise NotImplementedError
 
     def add(self, lhs, rhs):
-        return variable(torch.add(lhs, rhs))
+        raise NotImplementedError
 
     # Sum has been generalized to take an optional dim argument, which we
     # will need for Batched tensors
     def sum(self, input, dim=None, name=None):
-        if dim is None:
-            return variable(torch.sum(input), name)
-        else:
-            return variable(torch.sum(input, dim), name)
+        raise NotImplementedError
 
     def expand(self, input, sizes):
-        return variable(input.expand(sizes))
+        raise NotImplementedError
 
     # For closure under Batched tensors, we need these operations...
     def unsqueeze(self, input, dim):
-        return variable(torch.unsqueeze(input, dim))
+        raise NotImplementedError
 
     def squeeze(self, input, dim):
-        return variable(torch.squeeze(input, dim))
+        raise NotImplementedError
 
     # ...and we also need to overload the meaning of size/ones to
     # hide/reinsert batch dimensions
     def size(self, input):
+        raise NotImplementedError
+
+    def ones(self, size):
+        raise NotImplementedError
+
+    # For convenience, we provide dim, which just returns the length of
+    # the sizes
+    def dim(self, input):
+        return len(self.size(input))
+
+
+# To start with, we can implement a backend dispatcher layer Torch,
+# which just forwards the operator calls to our underlying library PyTorch
+# (and ensures that all the allocated tensors are labeled with variable).  You could
+# also imagine replacing this with a Numpy backend or even a pure Python
+# variant (although this file is not currently setup to do so.)
+
+
+class Torch(Dispatcher):
+    def mul(self, lhs, rhs):
+        return label(torch.mul(lhs, rhs))
+
+    def add(self, lhs, rhs):
+        return label(torch.add(lhs, rhs))
+
+    def sum(self, input, dim=None, name=None):
+        if dim is None:
+            return label(torch.sum(input), name)
+        else:
+            return label(torch.sum(input, dim), name)
+
+    def expand(self, input, sizes):
+        return label(input.expand(sizes))
+
+    def unsqueeze(self, input, dim):
+        return label(torch.unsqueeze(input, dim))
+
+    def squeeze(self, input, dim):
+        return label(torch.squeeze(input, dim))
+
+    def size(self, input):
+        # Return size a tuple for marginally more compact printing
         return tuple(input.size())
 
     def ones(self, size):
-        return variable(torch.ones(size))
+        return label(torch.ones(size))
 
 
-# For debugging, it is helpful to print out what operations are occurring.  This
-# decorator does just that!
+# Dispatcher layers are composable via object composition: we can
+# imagine a stack of dispatchers, each one calling into the next.
+# For example, the Logger dispatcher simply prints out what operation
+# was called on it, and then forwards on the operation to the inner
+# dispatcher.
+
+
 class Logger(Dispatcher):
     def __init__(self, inner, *, name):
         self.inner = inner
@@ -198,11 +251,18 @@ class Logger(Dispatcher):
         return r
 
 
-# The Autograd dispatcher is a wrapper around another dispatcher.  In the
-# most typical situation, Autograd wraps Torch, taking the basic (non-autograd
-# aware) tensor implementation and adds autograd support to it (delegating
-# primitive operations to the inner dispatcher.  However, it doesn't have to
-# wrap Torch!
+# Here is a simple example of using Logger and Torch together.  Whenever
+# we make calls to operations, we must do so via the Dispatcher object.
+# We will explicitly write out all of these calls before we add wrapper
+# class sugaring.
+
+d = Logger(Torch(), name="Torch")
+print(d.add(d.ones(2), d.ones(2)))
+
+
+# With the Dispatcher structure in hand, we are now in a good place to
+# port the autograd implementation from Simple Autograd into our new
+# framework.
 
 
 class Autograd(Dispatcher):
@@ -302,7 +362,7 @@ class Autograd(Dispatcher):
             size = self.inner.size(input)
             res = dL_dr
             # Broadcast over all dimensions that were reduced over
-            for i in _dim_set(self.inner.dim(input), dim):
+            for i in sum_dims(input_dim=self.inner.dim(input), dim=dim):
                 res = self.backward_inner().unsqueeze(res, i)
             return [self.backward_inner().expand(res, size)]
 
@@ -425,7 +485,7 @@ class Autograd(Dispatcher):
 
 # +
 torch.manual_seed(0)
-a, b = variable(torch.rand(4)), variable(torch.rand(4))
+a, b = label(torch.rand(4)), label(torch.rand(4))
 
 
 def simple(d, a, b):
@@ -490,6 +550,12 @@ print("db", db)
 # record the tape twice (although this doesn't matter too much, because the
 # saved tensors themselves can be shared between the two tapes, so it is just
 # the operator graph that is duplicated.
+#
+# This is our first example of using two dispatchers.  While we are
+# performing the inner grad, we perform our operations on the outer
+# dispatcher `d2`; after we are done with the inner grad we switch to
+# `d1`.  Intuitively, this corresponds from passing out of the inner
+# `grad` call to the outer `grad` call.
 
 # +
 # turning off create_graph will impede us from seeing the logging lines for
@@ -552,7 +618,9 @@ class Batched(Dispatcher):
     def sum(self, input, dim=None, name=None):
         # offset all the summed over dimensions by one
         assert self.inner.size(input)[0] == self.length
-        dim = tuple(i + 1 for i in _dim_set(self.inner.dim(input) - 1, dim))
+        dim = tuple(
+            i + 1 for i in sum_dims(input_dim=self.inner.dim(input) - 1, dim=dim)
+        )
         return self.inner.sum(input, dim, name=name)
 
     def expand(self, input, sizes):
@@ -573,7 +641,7 @@ class Batched(Dispatcher):
 
 # +
 # Our inputs are batched this time!
-va, vb = variable(torch.rand(2, 4)), variable(torch.rand(2, 4))
+va, vb = label(torch.rand(2, 4)), label(torch.rand(2, 4))
 
 d1 = Autograd(Torch(), name="Autograd1", create_graph=False)
 d2 = Batched(d1, length=2, name="Batched2")
@@ -643,8 +711,19 @@ print("dvb", dvb)
 # the above example so that it only has one level of Autograd:
 # Batched(Autograd(Torch(), create_graph=True)) and show you still get the same
 # result.
+
+
+# OK, so all of this dispatcher business is all nice and explicit, but
+# that's not what JAX/functorch's interface looks like.  How do we
+# bridge the gap?
 #
+# TODO: write this
+
+
+
 # Epilogue: Why didn't I use inheritance?  In fact, in the first version
 # of this notebook, I did.  But self makes it easy to accidentally go
 # back to the "top" of the dispatch stack, which is typically not what
 # you want.
+
+print("All done")
