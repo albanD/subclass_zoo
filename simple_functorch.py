@@ -996,39 +996,39 @@ fvb = FuncTensor(vb, DISPATCHER)
 dva, dvb = grad(L1, argnums=(0, 1))(fva, fvb)
 print("dva", dva)
 print("dvb", dvb)
-
-
 # -
 
 # Because FuncTensors are associated with the ambient dispatcher they
 # were created from, they are also allowed to escape from the context in
 # which they were defined, allowing for non-lexical, imperative
 # transform API.  For example, batching over module parameters is
-# problematic today.
+# problematic today, but all we need to do is tweak the FuncTensor's
+# dispatchers appropriately and everything works out.
 
 # +
+
+PlainTensor = lambda t: FuncTensor(torch.randn(N), DISPATCHER)
+BatchedTensor = lambda t: FuncTensor(t, Batched(DISPATCHER, length=B))
+
 class ScaleBiasModule:
     weight: FuncTensor
     bias: FuncTensor
 
     def __init__(self, N):
-        self.weight = FuncTensor(torch.randn(N), DISPATCHER)
-        self.bias = FuncTensor(torch.randn(N), DISPATCHER)
+        self.weight = PlainTensor(torch.randn(N))
+        self.bias = PlainTensor(torch.randn(N))
 
     def forward(self, input):
         return self.weight * input + self.bias
 
 
-top = DISPATCHER
 B = 2
 N = 3
-batched = Batched(top, length=B)
 m = ScaleBiasModule(N)
 # Ensemble weights only; input is not batched
-m.weight = FuncTensor(torch.randn(B, N), batched)
-input = FuncTensor(torch.randn(N), top)
-with dispatcher(batched):
-    output = m.forward(input)
+m.weight = BatchedTensor(torch.randn(B, N))
+input = PlainTensor(torch.randn(N))
+output = m.forward(input)
 print(
     "expect", input.tensor.unsqueeze(0) * m.weight.tensor + m.bias.tensor.unsqueeze(0)
 )
