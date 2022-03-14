@@ -331,3 +331,11 @@ Example2Indirect().main()
 # expressivity typically not what you want).  Mixin can be converted into
 # level but there isn't really any reason to do it.  Natively interoperates
 # with traditional object dispatch.
+#
+# Literally the point was
+# - get the __torch_function__ subclass ordering to work in our favor
+# - noticed super() is a thing and want to use that as basis for dispatch
+#
+# - why not wrapper: because of metadata swapping
+#
+# https://fuhm.net/super-harmful/
