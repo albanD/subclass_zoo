@@ -189,6 +189,11 @@ class Torch(Dispatcher):
         result = label(a), label(b)
         return result
 
+    def aot_function(self, f, *args):
+        print('"Compiling f"')
+        r = f(self, *args)
+        return torch.utils._pytree.tree_map(label, r)
+
     def expand(self, input, sizes):
         return label(input.expand(sizes))
 
@@ -396,6 +401,113 @@ class Autograd(Dispatcher):
             )
         )
         return r, saved
+
+    def aot_function(self, f, *args):
+        # strategy: we want to construct a backward aot_function without
+        # decomposing f at this level. To do this, we wrap f in a special
+        # function that will append to a special gradient tape. We then turn
+        # all the functions in the special gradient tape to a new aot_function
+        # that represents the backward pass
+        special_tape = []
+
+        def append_to_special_tape(f):
+            def new_f(dispatcher, *args):
+                saved = self.inner
+                saved_tape = self.gradient_tape
+                self.inner = dispatcher
+                self.gradient_tape = special_tape
+                try:
+                    result = f(self, *args)
+                    return result
+                finally:
+                    self.inner = saved
+                    self.gradient_tape = saved_tape
+            return new_f
+
+        # # alternative
+        # result = self.inner.aot_function(append_to_special_tape(f), *args)
+        # self.gradient_tape.extend(special_tape)
+        # return result
+
+        # Step 1: Compute result and shove everything onto a special tape
+        result = self.inner.aot_function(append_to_special_tape(f), *args)
+
+        # Step 2: This is just the Autograd.grad function from below, copy and pasted.
+        # f_bwd:
+        # a) take the special tape
+        # b) execute it
+        def f_bwd(dispatcher, grad_output, *inputs):
+            assert not self is dispatcher
+            saved = self.inner
+            self.inner = dispatcher
+
+            try:
+                desired_results = args
+                # this map holds dL/dX for all values X
+                dL_d: Dict[str, Tensor] = {}
+                # It starts by initializing the 'seed' dL/dL, which is 1
+                # TODO: indirect this via the backend
+                if isinstance(result, torch.Tensor):
+                    dL_d[result.t_name] = grad_output
+                else:
+                    assert isinstance(result, list)
+                    assert len(result) == 1
+                    dL_d[result[0].t_name] = grad_output
+                print(f"-- ??? -------")
+                # look up dL_dentries. If a variable is never used to compute the loss,
+                # we consider its gradient None, see the note below about zeros for more information.
+                def gather_grad(entries: List[str]):
+                    return [dL_d[entry] if entry in dL_d else None for entry in entries]
+
+                # propagate the gradient information backward
+                for entry in reversed(special_tape):
+                    dL_doutputs = gather_grad(entry.outputs)
+                    if all(dL_doutput is None for dL_doutput in dL_doutputs):
+                        # optimize for the case where some gradient pathways are zero. See
+                        # The note below for more details.
+                        continue
+
+                    # perform chain rule propagation specific to each compute
+                    dL_dinputs = entry.propagate(dL_doutputs)
+
+                    # Accululate the gradient produced for each input.
+                    # Each use of a variable produces some gradient dL_dinput for that
+                    # use. The multivariate chain rule tells us it is safe to sum
+                    # all the contributions together.
+                    for input, dL_dinput in zip(entry.inputs, dL_dinputs):
+                        if input not in dL_d:
+                            dL_d[input] = dL_dinput
+                        else:
+                            dL_d[input] = self.backward_inner().add(dL_d[input], dL_dinput)
+
+                # print some information to understand the values of each intermediate
+                # for name, value in dL_d.items():
+                #     print(f'{self.name} d{L.t_name}_d{name} = {value.t_name}')
+                print(f"------------------------")
+                rr = gather_grad(desired.t_name for desired in desired_results)
+                return rr
+            finally:
+                self.inner = saved
+                pass
+
+        # Step 3: The thing that we register as a backward pass is
+        # an aot_function version of f_bwd. This way, it benefits from "Compilation".
+        def propagate(dL_doutputs: List[Tensor]):
+            (dL_dr,) = dL_doutputs
+            results = self.backward_inner().aot_function(f_bwd, dL_dr, *args)
+            return results
+
+        if isinstance(result, torch.Tensor):
+            outputs = [result.t_name]
+        else:
+            outputs = torch.utils._pytree.tree_map(lambda x: x.t_name, result)
+
+        self.gradient_tape.append(
+            TapeEntry(
+                inputs=[arg.t_name for arg in args], outputs=outputs, propagate=propagate
+            )
+        )
+        return result
 
     # Extended to handle dim argument for Batched (later)
     def sum(self, input: Tensor, dim=None, name: Optional[str] = None):
@@ -663,6 +775,17 @@ class Batched(Dispatcher):
 
         r, saved = self.inner.custom_vjp(batchify(fwd_fn), batchify(bwd_fn), *args)
         return r, saved
+
+    def aot_function(self, f, *args):
+        def batchify(fn):
+            def new_fn(d, *args):
+                new_d = Batched(d, length = self.length, name = 'Generated')
+                result = fn(new_d, *args)
+                return result
+            return new_fn
+
+        r = self.inner.aot_function(batchify(f), *args)
+        return r
 
     def ones(self, size):
         return self.inner.ones((self.length,) + size)
@@ -1159,3 +1282,48 @@ def run_gradvmap(d2: 'Batched', d1: 'Autograd'):
     assert torch.allclose(dL99_a, 32 * va)
 
 run_gradvmap(d2, d1)
+
+# -
+
+# What about AOTAutograd?
+
+# +
+
+def f(dispatcher, x):
+    return dispatcher.mul(x, x)
+
+d1 = Batched(Torch(), length=2, name="Batched1")
+
+# vmap(aot_function(f))(va)
+# The following prints out "Compiling f" once.
+result = d1.aot_function(f, va)
+print('*' * 80)
+
+# grad(aot_function(f))(a)
+# The following also prints out "Compiling f" once.
+# Unfortunately the backward pass is not compiled, only the forward pass... TODO
+d1 = Autograd(Torch(), name="Autograd1")
+out = d1.aot_function(f, a)
+L98 = d1.sum(out, name='L98')
+
+# Note that "Compiling f" gets printed twice here!
+# Once for the forward, once for the backward...
+dL98_a, = d1.grad(L98, [a])
+assert torch.allclose(dL98_a, 2 * a)
+
+print('*' * 80)
+
+# Now for the biggest question: does this actually work with higher-order grad?
+d1 = Autograd(Torch(), name="Autograd1", create_graph=False)
+d2 = Autograd(d1, name="Autograd2", create_graph=False)
+
+out = d2.aot_function(f, a)
+L97 = d2.sum(out, name='L97')
+dL97_a, = d2.grad(L97, [a])
+assert torch.allclose(dL97_a, 2 * a)
+
+dL97_a_sum = d1.sum(dL97_a)
+ddL97_a_a, = d1.grad(dL97_a_sum, [a])
+assert torch.allclose(ddL97_a_a, torch.ones_like(ddL97_a_a) * 2)
+
+print('*' * 80)
