@@ -66,7 +66,6 @@ def fill_defaults(args, n, defaults_tail):
         r.append(defaults_tail[i - n + len(defaults_tail)])
     return r
 
-
 class PythonMetaTensorMode(torch.Tensor):
     # TODO: figure out a better idiom for this; "pure" modes shouldn't be
     # instantiated so arguably they shouldn't be torch.Tensor subclasses,
@@ -86,6 +85,11 @@ class PythonMetaTensorMode(torch.Tensor):
             for t in itertools.chain(flat_args, flat_kwargs)
         ) and kwargs.get("device", None) != torch.device("meta"):
             return super().__torch_dispatch__(func, types, args, kwargs)
+
+        try:
+            return super().__torch_dispatch__(func, types, args, kwargs)
+        except NotImplementedError:
+            pass
 
         if func == aten._embedding_bag.default:
             # Defaults can be determined by reading native_functions.yaml
@@ -288,14 +292,38 @@ class PythonMetaTensorMode(torch.Tensor):
             # TODO: layout is not done correctly
             permutation_matrix = LU_data.new_empty(unpacked_pivots_sizes)
             return permutation_matrix, L, U
+        elif func == aten.addbmm.default:
+            self, batch1, batch2 = args
+            dim1 = batch1.size(1)
+            dim2 = batch2.size(2)
+            self = self.expand((dim1, dim2))
+            beta = kwargs.pop("beta", 1)
+            alpha = kwargs.pop("alpha", 1)
+            assert not kwargs
+            assert batch1.dim() == 3
+            assert batch2.dim() == 3
+            assert batch1.size(0) == batch2.size(0)
+            assert batch1.size(2) == batch2.size(0)
+            assert batch1.size(2) == batch2.size(1)
+            assert self.size(0) == dim1 and self.size(1) == dim2
+            return self.new_empty(self.size())
+        elif func == aten.dot.default or func == aten.vdot.default:
+            self, other = args
+            assert not kwargs
+            assert self.dim() == 1 and other.dim() == 1
+            assert self.dtype == other.dtype
+            assert self.numel() == other.numel()
+            return self.new_empty(())
+        elif func == aten.masked_select.default:
+            raise RuntimeError("cannot masked_select a meta tensor")
+        # elif func == aten.stack.default:
+        #    tensors, dim = fill_defaults(args, 2, [0])
+
         # add your other patches here
 
-        try:
-            return super().__torch_dispatch__(func, types, args, kwargs)
-        except NotImplementedError:
-            # TODO: aten._local_scalar_dense.default is special, you can't
-            # implement it, add a special case for it
-            raise NotImplementedError(f"no meta implementation for {func}")
+        # TODO: aten._local_scalar_dense.default is special, you can't
+        # implement it, add a special case for it
+        raise NotImplementedError(f"no meta implementation for {func} aka {func._schema}")
 
 
 class PythonMetaTensor(PythonMetaTensorMode):
