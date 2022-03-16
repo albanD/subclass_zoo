@@ -295,7 +295,7 @@ class PythonMetaTensorMode(torch.Tensor):
         except NotImplementedError:
             # TODO: aten._local_scalar_dense.default is special, you can't
             # implement it, add a special case for it
-            raise RuntimeError(f"no meta implementation for {func}")
+            raise NotImplementedError(f"no meta implementation for {func}")
 
 
 class PythonMetaTensor(PythonMetaTensorMode):
