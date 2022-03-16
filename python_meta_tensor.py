@@ -180,7 +180,7 @@ class PythonMetaTensorMode(torch.Tensor):
             # TODO: dtype shows up as int which is bad; should convert
             # this as torch.dtype when it gets here.  Fortunately
             # forwarding to torch.ops the integer will be understood.
-            return torch.ops.aten.empty(n, **kwargs)
+            return torch.ops.aten.empty((n,), **kwargs)
         elif func == aten.max.default:
             self, = args
             assert not kwargs
@@ -204,8 +204,21 @@ class PythonMetaTensorMode(torch.Tensor):
             return self.new_empty(()), self.new_empty(self.size()), self.new_empty(pivs_size, dtype=torch.int)
         elif func == aten.abs_.default:
             self, = args
+            # TODO: assert self not complex
             assert not kwargs
             return self
+        elif func == aten.abs.default:
+            self, = args
+            assert not kwargs
+            if self.is_complex():
+                from_complex = {
+                    torch.cfloat: torch.float,
+                    torch.cdouble: torch.double
+                }
+                float_type = from_complex[self.dtype]
+                self.new_empty(self.size(), dtype=float_type)
+            else:
+                return self.new_empty(self.size())
         elif func == aten.complex.default:
             real, imag = args
             assert real.dtype == imag.dtype
@@ -220,6 +233,48 @@ class PythonMetaTensorMode(torch.Tensor):
             n, = args
             # intentionally no assert not kwargs
             return torch.ops.aten.empty((n, n), **kwargs)
+        elif func == aten.linalg_cholesky_ex.default:
+            input, = args
+            upper = kwargs.pop("upper", False)
+            check_errors = kwargs.pop("check_errors", False)
+            assert not kwargs
+            info_output_dtype = torch.int
+            # TODO: check linalg compatible dtype
+            # linalg_cholesky_out_info
+            assert input.dim() >= 2
+            assert input.size(-1) == input.size(-2)
+            L_sizes = list(input.size())
+            L_sizes[-1], L_sizes[-2] = L_sizes[-2], L_sizes[-1]
+            L = input.new_empty(L_sizes)
+            L.transpose_(-2, -1)
+            info_sizes = input.size()[:-2]
+            info = input.new_empty(info_sizes, dtype=torch.int)
+            return L, info
+        elif func == aten._linalg_check_errors.default:
+            return
+        elif func == aten.lu_unpack.default:
+            args = fill_defaults(args, 4, [True, True])
+            LU_data, LU_pivots, unpack_data, unpack_pivots = args
+            L = None
+            U = None
+            m = LU_data.size(-2)
+            n = LU_data.size(-1)
+            k = min(m, n)
+            if unpack_data:
+                U = LU_data.tril()
+                if m != k:
+                    U = U.narrow(-2, 0, k)
+                L = LU_data.triu()
+                if k != n:
+                    L = L.narrow(-1, 0, k)
+            if not unpack_pivots:
+                return None, L, U
+            unpacked_pivots_sizes = list(LU_pivots.size())
+            unpacked_pivots_sizes[-1] = m
+            unpacked_pivots_sizes.append(m)
+            # TODO: layout is not done correctly
+            permutation_matrix = LU_data.new_empty(unpacked_pivots_sizes)
+            return permutation_matrix, L, U
         # add your other patches here
 
         try:
