@@ -316,8 +316,30 @@ class PythonMetaTensorMode(torch.Tensor):
             return self.new_empty(())
         elif func == aten.masked_select.default:
             raise RuntimeError("cannot masked_select a meta tensor")
-        # elif func == aten.stack.default:
-        #    tensors, dim = fill_defaults(args, 2, [0])
+        elif func == aten.stack.default:
+            tensors, dim = fill_defaults(args, 2, [0])
+            # the internal implementation is completely illegible
+            # so I reimplemented this from the docs
+            assert tensors
+            assert all(tensors[0].shape == t.shape for t in tensors[1:])
+            r_shape = list(tensors[0].shape)
+            r_shape.insert(dim, len(tensors))
+            return tensors[0].new_empty(r_shape)
+        elif func == aten._cdist_forward.default:
+            x1, x2, p, compute_mode = args
+            assert x1.dim() >= 2
+            assert x2.dim() >= 2
+            assert x1.size(-1) == x2.size(-1)
+            # todo assert is floating
+            assert p >= 0
+            # todo assert devices
+            r1 = x1.size(-2)
+            r2 = x2.size(-2)
+            batch_tensor1 = x1.shape[:-2]
+            batch_tensor2 = x2.shape[:-2]
+            output_shape = list(torch.broadcast_shapes(batch_tensor1, batch_tensor2))
+            output_shape.extend([r1, r2])
+            return x1.new_empty(output_shape)
 
         # add your other patches here
 
