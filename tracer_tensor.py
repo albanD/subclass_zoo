@@ -8,7 +8,7 @@ from torch.fx.passes.shape_prop import _extract_tensor_metadata
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
 
-from utils import no_dispatch, tree_map2
+from utils import no_dispatch
 
 """
 TracerTensor is a tensor that traces ATen operations that are performed on it

@@ -6,9 +6,6 @@ import torch
 from base_tensor import BaseTensor
 from torch import Tensor
 from torch.testing._internal.common_utils import (
-    disable_gc,
-    instantiate_parametrized_tests,
-    parametrize,
     run_tests,
     TestCase,
 )

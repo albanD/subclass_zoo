@@ -1,9 +1,11 @@
 import weakref
 from collections import defaultdict
+import unittest
 
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
+from torch.testing._internal.common_cuda import TEST_CUDA
 
 alive_tensors = weakref.WeakValueDictionary()
 
@@ -91,6 +93,7 @@ class MemoryDebugTensor(torch.Tensor):
 
 
 class NegativeTensorTest(TestCase):
+    @unittest.skipIf(not TEST_CUDA, "needs cuda")
     def test_construction(self):
         a = MemoryDebugTensor(
             torch.randn(2**27, requires_grad=True, device="cuda"), func="original"
@@ -100,3 +103,7 @@ class NegativeTensorTest(TestCase):
         self.assertEqual(len(tuple(alive_tensors.keys())), 3)
         del c
         self.assertEqual(len(tuple(alive_tensors.keys())), 2)
+
+
+if __name__ == "__main__":
+    run_tests()
