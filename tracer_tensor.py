@@ -175,8 +175,8 @@ class TracerTensorTest(TestCase):
 graph():
     %arg_1 : [#users=1] = placeholder[target=arg_1]
     %arg_2 : [#users=1] = placeholder[target=arg_2]
-    %add : [#users=1] = call_function[target=torch.ops.aten.add](args = (%arg_1, %arg_2), kwargs = {})
-    return add""",
+    %add_tensor : [#users=1] = call_function[target=torch.ops.aten.add.Tensor](args = (%arg_1, %arg_2), kwargs = {})
+    return add_tensor""",
         )
 
     def test_constant(self):
@@ -188,8 +188,8 @@ graph():
 graph():
     %arg_1 : [#users=1] = placeholder[target=arg_1]
     %_tensor_constant0 : [#users=1] = get_attr[target=_tensor_constant0]
-    %add : [#users=1] = call_function[target=torch.ops.aten.add](args = (%_tensor_constant0, %arg_1), kwargs = {})
-    return add""",
+    %add_tensor : [#users=1] = call_function[target=torch.ops.aten.add.Tensor](args = (%_tensor_constant0, %arg_1), kwargs = {})
+    return add_tensor""",
         )
 
 
