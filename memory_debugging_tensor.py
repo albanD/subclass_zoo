@@ -1,6 +1,7 @@
 import torch
 from torch.utils._pytree import tree_map
 from torch.testing._internal.common_utils import TestCase, run_tests
+from collections import defaultdict
 
 import weakref
 alive_tensors = weakref.WeakValueDictionary()
@@ -11,6 +12,7 @@ alive_tensors = weakref.WeakValueDictionary()
 # wanted to understand *why* PyTorch had a peak memory usage of ~5x the original
 # tensor.
 
+name_cnt = defaultdict(int)
 class MemoryDebugTensor(torch.Tensor):
     elem: torch.Tensor
 
@@ -27,11 +29,8 @@ class MemoryDebugTensor(torch.Tensor):
         )
         r.elem = elem
         if func is not None:
-            idx = 0
-            name = f'{func}'
-            while name in alive_tensors:
-                idx += 1
-                name = f'{func}_{idx}'
+            name = f'{func}_{name_cnt[str(func)]}'
+            name_cnt[str(func)] += 1
             alive_tensors[name] = elem
         return r
 
@@ -44,9 +43,6 @@ class MemoryDebugTensor(torch.Tensor):
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         def unwrap(e):
             return e.elem if isinstance(e, MemoryDebugTensor) else e
-        # no_dispatch is only needed if you use enable_python_mode.
-        # It prevents infinite recursion.
-        print(func)
         outs = func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
 
         def wrap(e):
@@ -55,9 +51,10 @@ class MemoryDebugTensor(torch.Tensor):
             return MemoryDebugTensor(e, func) if isinstance(e, torch.Tensor) else e
 
         outs = tree_map(wrap, outs)
-        # torch.cuda.synchronize()
-        # import gc; gc.collect()
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
+        import gc; gc.collect()
+        torch.cuda.synchronize()
+        print(func)
         print(f"Cur Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
         print(f"Peak Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB")
         alive_items = [(k, v) for k,v in alive_tensors.items()]
@@ -65,7 +62,7 @@ class MemoryDebugTensor(torch.Tensor):
         for k, v in alive_items:
             exists_already = False
             for k2, v2 in deduped_tensors:
-                if v.data_ptr() == v2.data_ptr():
+                if v.storage().data_ptr() == v2.storage().data_ptr():
                     exists_already = True
                     break
             if exists_already:
@@ -78,5 +75,12 @@ class MemoryDebugTensor(torch.Tensor):
         return outs
 
 
-a = MemoryDebugTensor(torch.randn(2**25, requires_grad=True, device='cuda'), func="original")
-torch.softmax(a, dim=0).sum().backward()
+
+class NegativeTensorTest(TestCase):
+    def test_construction(self):
+        a = MemoryDebugTensor(torch.randn(2**27, requires_grad=True, device='cuda'), func="original")
+        b = a * 2
+        c = a * 4
+        self.assertEqual(len(tuple(alive_tensors.keys())), 3)
+        del c
+        self.assertEqual(len(tuple(alive_tensors.keys())), 2)
