@@ -9,6 +9,9 @@ import torch.nn
 
 import itertools
 
+aten = torch.ops.aten
+aten.__origin__ = None
+
 """
 Meta tensors give you the ability to run PyTorch code without having to
 actually do the compute, which is useful if you only need to figure out what
@@ -79,10 +82,10 @@ class PythonMetaTensorMode(torch.Tensor):
         # Only interpose for meta invocations
         flat_args, _ = tree_flatten(args)
         flat_kwargs, _ = tree_flatten(kwargs)
-        if not any(isinstance(t, torch.Tensor) and t.is_meta for t in itertools.chain(flat_args, flat_kwargs)):
+        if not any(isinstance(t, torch.Tensor) and t.is_meta for t in itertools.chain(flat_args, flat_kwargs)) and kwargs.get('device', None) != torch.device('meta'):
             return super().__torch_dispatch__(func, types, args, kwargs)
 
-        if func == torch.ops.aten._embedding_bag.default:
+        if func == aten._embedding_bag.default:
             # Defaults can be determined by reading native_functions.yaml
             # We will soon make these available directly from the torch.ops
             # API, waiting on https://github.com/pytorch/pytorch/pull/72673
@@ -104,7 +107,7 @@ class PythonMetaTensorMode(torch.Tensor):
             bag_size = offsets.new_empty(offsets.size())
             max_indices = offsets.new_empty(bag_size.size())
             return output, offset2bag, bag_size, max_indices
-        elif func == torch.ops.aten.index_select.default:
+        elif func == aten.index_select.default:
             # TODO: when I didn't have embedding implemented, it reported that
             # index_select wasn't implemented, but it didn't actually help to
             # implement this (because once we go to the
@@ -116,7 +119,7 @@ class PythonMetaTensorMode(torch.Tensor):
             if self.dim() > 0:
                 result_size[dim] = index.numel()
             return self.new_empty(result_size)
-        elif func == torch.ops.aten.embedding.default:
+        elif func == aten.embedding.default:
             args = fill_defaults(args, 5, [-1, False, False])
             weight, indices, padding_idx, scale_grad_by_freq, sparse = args
             assert not kwargs
@@ -127,9 +130,104 @@ class PythonMetaTensorMode(torch.Tensor):
             size = list(indices.size())
             size.extend(weight.size()[1:])
             return weight.index_select(0, indices.reshape(-1)).view(size)
+        elif func == aten._linalg_qr_helper.default:
+            input, mode = args
+            assert not kwargs
+            if mode == "reduced":
+                compute_q = True
+                reduced_mode = True
+            elif mode == "complete":
+                compute_q = True
+                reduced_mode = False
+            elif mode == "r":
+                compute_q = False
+                reduced_mode = True
+            else:
+                raise RuntimeError(f"qr received unrecognized mode {mode}")
+            m = input.size(-2)
+            n = input.size(-1)
+            mn = min(m, n)
+            if compute_q:
+                Qt_shape = list(input.size())
+                Qt_shape[-2] = mn if reduced_mode else m
+                Qt_shape[-1] = m
+                Q = input.new_empty(Qt_shape)
+                Q.transpose_(-2, -1)
+            else:
+                Q = input.new_empty(0)
+            Rt_shape = list(input.size())
+            Rt_shape[-2] = n
+            Rt_shape[-1] = mn if reduced_mode or not compute_q else m
+            R = input.new_empty(Rt_shape)
+            R.transpose_(-2, -1)
+            return (Q, R)
+        elif func == aten.linalg_qr.default:
+            self, mode = fill_defaults(args, 2, ['reduced'])
+            assert not kwargs
+            assert self.dim() >= 2
+            return aten._linalg_qr_helper(self, mode)
+        elif func == aten.inverse.default:
+            self, = args
+            assert not kwargs
+            if self.numel() == 0:
+                return self.new_empty(self.size())
+            inverse = self.new_empty(self.size())
+            inverse.transpose_(-2, -1)
+            return inverse
+        elif func == aten.randperm.default:
+            n, = args
+            # intentionally no assert not kwargs
+            # TODO: dtype shows up as int which is bad; should convert
+            # this as torch.dtype when it gets here.  Fortunately
+            # forwarding to torch.ops the integer will be understood.
+            return torch.ops.aten.empty(n, **kwargs)
+        elif func == aten.max.default:
+            self, = args
+            assert not kwargs
+            return self.new_empty(())
+        elif func == aten.sort.default:
+            self, dim, descending = fill_defaults(args, 3, [-1, False])
+            assert not kwargs
+            return self.new_empty(self.size()), self.new_empty(self.size(), dtype=torch.long)
+        elif func == aten.repeat_interleave.Tensor:
+            repeats, = args
+            output_size = kwargs.pop('output_size', None)
+            assert not kwargs
+            if output_size is None:
+                raise RuntimeError("cannot repeat_interleave a meta tensor without output_size")
+            return repeats.new_empty(output_size)
+        elif func == aten._det_lu_based_helper.default:
+            self, = args
+            assert not kwargs
+            pivs_size = list(self.size()[:-2])
+            pivs_size.append(min(self.size(-1), self.size(-2)))
+            return self.new_empty(()), self.new_empty(self.size()), self.new_empty(pivs_size, dtype=torch.int)
+        elif func == aten.abs_.default:
+            self, = args
+            assert not kwargs
+            return self
+        elif func == aten.complex.default:
+            real, imag = args
+            assert real.dtype == imag.dtype
+            assert not kwargs
+            assert real.size() == imag.size()
+            to_complex = {
+                torch.float: torch.cfloat,
+                torch.double: torch.cdouble
+            }
+            return real.new_empty(real.size(), dtype=to_complex[real.dtype])
+        elif func == aten.eye.default:
+            n, = args
+            # intentionally no assert not kwargs
+            return torch.ops.aten.empty((n, n), **kwargs)
         # add your other patches here
 
-        return super().__torch_dispatch__(func, types, args, kwargs)
+        try:
+            return super().__torch_dispatch__(func, types, args, kwargs)
+        except:
+            # TODO: aten._local_scalar_dense.default is special, you can't
+            # implement it, add a special case for it
+            raise RuntimeError(f"no meta implementation for {func}")
 
 class PythonMetaTensor(PythonMetaTensorMode):
     @staticmethod
