@@ -58,9 +58,7 @@ class VerifierTensor(BaseTensor):
         # Verify that this is correct
         node = VERIFIER.advance()
         assert node.op == "call_function", node.op
-        # TODO: this is a bug, the saved function in FX should be an overload,
-        # not an overload packet
-        assert node.target == func.overloadpacket
+        assert node.target == func
 
         def translate(n, v):
             if isinstance(n, Node):
