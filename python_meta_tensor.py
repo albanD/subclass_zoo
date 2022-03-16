@@ -1,8 +1,6 @@
 import torch
 from torch.utils._pytree import tree_map, tree_flatten
-from torch.testing._internal.common_utils import (
-    TestCase, run_tests
-)
+from torch.testing._internal.common_utils import TestCase, run_tests
 from torch.utils._python_dispatch import enable_python_mode
 
 import torch.nn
@@ -65,8 +63,9 @@ def fill_defaults(args, n, defaults_tail):
         raise RuntimeError("not enough defaults to fill arguments")
     r = list(args)
     for i in range(len(args), n):
-        r.append(defaults_tail[i-n+len(defaults_tail)])
+        r.append(defaults_tail[i - n + len(defaults_tail)])
     return r
+
 
 class PythonMetaTensorMode(torch.Tensor):
     # TODO: figure out a better idiom for this; "pure" modes shouldn't be
@@ -82,7 +81,10 @@ class PythonMetaTensorMode(torch.Tensor):
         # Only interpose for meta invocations
         flat_args, _ = tree_flatten(args)
         flat_kwargs, _ = tree_flatten(kwargs)
-        if not any(isinstance(t, torch.Tensor) and t.is_meta for t in itertools.chain(flat_args, flat_kwargs)) and kwargs.get('device', None) != torch.device('meta'):
+        if not any(
+            isinstance(t, torch.Tensor) and t.is_meta
+            for t in itertools.chain(flat_args, flat_kwargs)
+        ) and kwargs.get("device", None) != torch.device("meta"):
             return super().__torch_dispatch__(func, types, args, kwargs)
 
         if func == aten._embedding_bag.default:
@@ -90,14 +92,23 @@ class PythonMetaTensorMode(torch.Tensor):
             # We will soon make these available directly from the torch.ops
             # API, waiting on https://github.com/pytorch/pytorch/pull/72673
             args = fill_defaults(args, 9, [False, 0, False, None, False, -1])
-            weight, indices, offsets, scale_grad_by_freq, mode, sparse, \
-                per_sample_weights, include_last_offset, padding_idx = args
+            (
+                weight,
+                indices,
+                offsets,
+                scale_grad_by_freq,
+                mode,
+                sparse,
+                per_sample_weights,
+                include_last_offset,
+                padding_idx,
+            ) = args
             assert not kwargs
             # I determined the meaning of the outputs and sizes by reading
             # over the kernel in aten/src/ATen/native/EmbeddingBag.cpp
             output = weight.new_empty(
                 offset.size(0) - 1 if include_last_offset else offsets.size(0),
-                weight.size(1)
+                weight.size(1),
             )
             MODE_SUM, MODE_MEAN, MODE_MAX = range(3)
             if mode == MODE_MEAN or mode == MODE_MAX:
@@ -162,12 +173,12 @@ class PythonMetaTensorMode(torch.Tensor):
             R.transpose_(-2, -1)
             return (Q, R)
         elif func == aten.linalg_qr.default:
-            self, mode = fill_defaults(args, 2, ['reduced'])
+            self, mode = fill_defaults(args, 2, ["reduced"])
             assert not kwargs
             assert self.dim() >= 2
             return aten._linalg_qr_helper(self, mode)
         elif func == aten.inverse.default:
-            self, = args
+            (self,) = args
             assert not kwargs
             if self.numel() == 0:
                 return self.new_empty(self.size())
@@ -175,46 +186,51 @@ class PythonMetaTensorMode(torch.Tensor):
             inverse.transpose_(-2, -1)
             return inverse
         elif func == aten.randperm.default:
-            n, = args
+            (n,) = args
             # intentionally no assert not kwargs
             # TODO: dtype shows up as int which is bad; should convert
             # this as torch.dtype when it gets here.  Fortunately
             # forwarding to torch.ops the integer will be understood.
             return torch.ops.aten.empty((n,), **kwargs)
         elif func == aten.max.default:
-            self, = args
+            (self,) = args
             assert not kwargs
             return self.new_empty(())
         elif func == aten.sort.default:
             self, dim, descending = fill_defaults(args, 3, [-1, False])
             assert not kwargs
-            return self.new_empty(self.size()), self.new_empty(self.size(), dtype=torch.long)
+            return self.new_empty(self.size()), self.new_empty(
+                self.size(), dtype=torch.long
+            )
         elif func == aten.repeat_interleave.Tensor:
-            repeats, = args
-            output_size = kwargs.pop('output_size', None)
+            (repeats,) = args
+            output_size = kwargs.pop("output_size", None)
             assert not kwargs
             if output_size is None:
-                raise RuntimeError("cannot repeat_interleave a meta tensor without output_size")
+                raise RuntimeError(
+                    "cannot repeat_interleave a meta tensor without output_size"
+                )
             return repeats.new_empty(output_size)
         elif func == aten._det_lu_based_helper.default:
-            self, = args
+            (self,) = args
             assert not kwargs
             pivs_size = list(self.size()[:-2])
             pivs_size.append(min(self.size(-1), self.size(-2)))
-            return self.new_empty(()), self.new_empty(self.size()), self.new_empty(pivs_size, dtype=torch.int)
+            return (
+                self.new_empty(()),
+                self.new_empty(self.size()),
+                self.new_empty(pivs_size, dtype=torch.int),
+            )
         elif func == aten.abs_.default:
-            self, = args
+            (self,) = args
             # TODO: assert self not complex
             assert not kwargs
             return self
         elif func == aten.abs.default:
-            self, = args
+            (self,) = args
             assert not kwargs
             if self.is_complex():
-                from_complex = {
-                    torch.cfloat: torch.float,
-                    torch.cdouble: torch.double
-                }
+                from_complex = {torch.cfloat: torch.float, torch.cdouble: torch.double}
                 float_type = from_complex[self.dtype]
                 self.new_empty(self.size(), dtype=float_type)
             else:
@@ -224,17 +240,14 @@ class PythonMetaTensorMode(torch.Tensor):
             assert real.dtype == imag.dtype
             assert not kwargs
             assert real.size() == imag.size()
-            to_complex = {
-                torch.float: torch.cfloat,
-                torch.double: torch.cdouble
-            }
+            to_complex = {torch.float: torch.cfloat, torch.double: torch.cdouble}
             return real.new_empty(real.size(), dtype=to_complex[real.dtype])
         elif func == aten.eye.default:
-            n, = args
+            (n,) = args
             # intentionally no assert not kwargs
             return torch.ops.aten.empty((n, n), **kwargs)
         elif func == aten.linalg_cholesky_ex.default:
-            input, = args
+            (input,) = args
             upper = kwargs.pop("upper", False)
             check_errors = kwargs.pop("check_errors", False)
             assert not kwargs
@@ -284,6 +297,7 @@ class PythonMetaTensorMode(torch.Tensor):
             # implement it, add a special case for it
             raise RuntimeError(f"no meta implementation for {func}")
 
+
 class PythonMetaTensor(PythonMetaTensorMode):
     @staticmethod
     def __new__(cls, elem):
@@ -312,40 +326,42 @@ class PythonMetaTensor(PythonMetaTensorMode):
 
 class PythonMetaTensorTest(TestCase):
     def test_basic(self):
-        x = PythonMetaTensor(torch.empty(2, 2, device='meta'))
+        x = PythonMetaTensor(torch.empty(2, 2, device="meta"))
         y = x + x
         self.assertEqual(y.shape, (2, 2))
 
     def test_embedding_bag(self):
-        embedding_sum = torch.nn.EmbeddingBag(10, 3, mode='sum', device='meta')
-        input = torch.empty(8, dtype=torch.long, device='meta')
-        offsets = torch.empty(2, dtype=torch.long, device='meta')
+        embedding_sum = torch.nn.EmbeddingBag(10, 3, mode="sum", device="meta")
+        input = torch.empty(8, dtype=torch.long, device="meta")
+        offsets = torch.empty(2, dtype=torch.long, device="meta")
         self.assertRaises(NotImplementedError, lambda: embedding_sum(input, offsets))
         r = embedding_sum(PythonMetaTensor(input), PythonMetaTensor(offsets))
-        self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device='meta'))
+        self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device="meta"))
 
     def test_embedding_via_mode(self):
         with enable_python_mode(PythonMetaTensorMode):
-            embedding = torch.nn.Embedding(10, 3, device='meta')
-            input = torch.empty((2, 4), dtype=torch.long, device='meta')
+            embedding = torch.nn.Embedding(10, 3, device="meta")
+            input = torch.empty((2, 4), dtype=torch.long, device="meta")
             r = embedding(input)
-            self.assertEqual(r, torch.empty((2, 4, 3), dtype=torch.float, device='meta'))
+            self.assertEqual(
+                r, torch.empty((2, 4, 3), dtype=torch.float, device="meta")
+            )
 
     def test_embedding_bag_via_mode(self):
         with enable_python_mode(PythonMetaTensorMode):
-            embedding_sum = torch.nn.EmbeddingBag(10, 3, mode='sum', device='meta')
-            input = torch.empty(8, dtype=torch.long, device='meta')
-            offsets = torch.empty(2, dtype=torch.long, device='meta')
+            embedding_sum = torch.nn.EmbeddingBag(10, 3, mode="sum", device="meta")
+            input = torch.empty(8, dtype=torch.long, device="meta")
+            offsets = torch.empty(2, dtype=torch.long, device="meta")
             r = embedding_sum(input, offsets)
-            self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device='meta'))
+            self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device="meta"))
 
             # Make sure we don't interpose on non-meta computation
-            embedding_sum = torch.nn.EmbeddingBag(10, 3, mode='sum')
-            input = torch.tensor([1,2,4,5,4,3,2,9], dtype=torch.long)
-            offsets = torch.tensor([0,4], dtype=torch.long)
+            embedding_sum = torch.nn.EmbeddingBag(10, 3, mode="sum")
+            input = torch.tensor([1, 2, 4, 5, 4, 3, 2, 9], dtype=torch.long)
+            offsets = torch.tensor([0, 4], dtype=torch.long)
             r = embedding_sum(input, offsets)
             self.assertFalse(r.is_meta)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_tests()
