@@ -107,7 +107,7 @@ class PythonMetaTensorMode(torch.Tensor):
             # I determined the meaning of the outputs and sizes by reading
             # over the kernel in aten/src/ATen/native/EmbeddingBag.cpp
             output = weight.new_empty(
-                offset.size(0) - 1 if include_last_offset else offsets.size(0),
+                offsets.size(0) - 1 if include_last_offset else offsets.size(0),
                 weight.size(1),
             )
             MODE_SUM, MODE_MEAN, MODE_MAX = range(3)
