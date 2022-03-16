@@ -55,8 +55,8 @@ class MemoryDebugTensor(torch.Tensor):
         import gc; gc.collect()
         torch.cuda.synchronize()
         print(func)
-        print(f"Cur Memory: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
-        print(f"Peak Memory: {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB")
+        print(f"Cur Memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"Peak Memory: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
         alive_items = [(k, v) for k,v in alive_tensors.items()]
         deduped_tensors = []
         for k, v in alive_items:
@@ -70,7 +70,7 @@ class MemoryDebugTensor(torch.Tensor):
             deduped_tensors.append((k, v))
         deduped_tensors = sorted(deduped_tensors, key=lambda x: -x[1].storage().nbytes())
 
-        print("Alive Tensors: ", [(k, v.storage().nbytes()/2**30) for k, v in deduped_tensors])
+        print("Alive Tensors: ", [(k, v.storage().nbytes()/1e9) for k, v in deduped_tensors])
         print()
         return outs
 
