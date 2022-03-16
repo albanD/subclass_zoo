@@ -1,8 +1,10 @@
+import unittest
+
 import torch
-from torch.testing._internal.common_utils import TestCase, run_tests
 
 from base_tensor import BaseTensor
-import unittest
+from torch.testing._internal.common_utils import run_tests, TestCase
+
 
 class BugZoo(TestCase):
     @unittest.expectedFailure
@@ -21,8 +23,9 @@ class BugZoo(TestCase):
             @classmethod
             def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
                 return super().__torch_dispatch__(func, types, list(args), kwargs)
+
         SuperDispatchSegfaultTensor(torch.tensor(1.0)).neg()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_tests()

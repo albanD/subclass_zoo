@@ -1,11 +1,11 @@
+import itertools
+
 import torch
-from torch.utils._pytree import tree_map, tree_flatten
-from torch.testing._internal.common_utils import TestCase, run_tests
-from torch.utils._python_dispatch import enable_python_mode
 
 import torch.nn
-
-import itertools
+from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.utils._python_dispatch import enable_python_mode
+from torch.utils._pytree import tree_flatten, tree_map
 
 aten = torch.ops.aten
 aten.__origin__ = None

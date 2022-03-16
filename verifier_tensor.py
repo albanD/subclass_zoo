@@ -1,9 +1,9 @@
 import torch
-from torch.testing._internal.common_utils import TestCase, run_tests
+from base_tensor import BaseTensor
 from torch.fx import Interpreter, Node
+from torch.testing._internal.common_utils import run_tests, TestCase
 
 from tracer_tensor import dispatch_trace
-from base_tensor import BaseTensor
 
 # https://github.com/albanD/subclass_zoo/blob/33d7afe63c2a336e01eaf3e81fba085a68e3955f/bug_zoo.py#L18-L24
 
@@ -12,6 +12,7 @@ from base_tensor import BaseTensor
 #   - first time run with normal TracerTensor
 #   - second time run with VerifierTensor
 # recovery is not necessary
+
 
 class Verifier:
     def __init__(self, interpreter, node):
@@ -40,7 +41,9 @@ class Verifier:
     def constant_node(self, t):
         return self.constant_map[t]
 
+
 VERIFIER = None
+
 
 class VerifierTensor(BaseTensor):
     @staticmethod
@@ -117,7 +120,9 @@ class SpeculatingJit:
             # that have a correspondence to getattr nodes but it is a little
             # fiddly to implement
             global VERIFIER
-            VERIFIER = Verifier(Interpreter(self.graph), next(iter(self.graph.graph.nodes)))
+            VERIFIER = Verifier(
+                Interpreter(self.graph), next(iter(self.graph.graph.nodes))
+            )
             i = 0
             verifier_args = []
             for a in args:
@@ -147,6 +152,7 @@ class VerifierTensorTest(TestCase):
 
     def test_constant(self):
         x = torch.zeros(2)
+
         def root(y):
             return torch.add(x, y)
 
@@ -158,6 +164,7 @@ class VerifierTensorTest(TestCase):
 
     def test_validation_failure(self):
         i = 0
+
         def root(x, y):
             nonlocal i
             i += 1
@@ -171,5 +178,6 @@ class VerifierTensorTest(TestCase):
         self.assertEqual(r, torch.zeros(2))
         self.assertRaises(AssertionError, lambda: f(torch.ones(2), torch.zeros(2)))
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     run_tests()

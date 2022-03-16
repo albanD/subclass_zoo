@@ -1,20 +1,25 @@
-import torch
-from torch import Tensor
-from torch.utils._pytree import tree_map
-from torch.testing._internal.common_utils import (
-    TestCase, run_tests, disable_gc, parametrize,
-    instantiate_parametrized_tests
-)
-
-import functools
 import contextlib
 
-from utils import no_dispatch
+import functools
+
+import torch
 from base_tensor import BaseTensor
+from torch import Tensor
+from torch.testing._internal.common_utils import (
+    disable_gc,
+    instantiate_parametrized_tests,
+    parametrize,
+    run_tests,
+    TestCase,
+)
+from torch.utils._pytree import tree_map
+
+from utils import no_dispatch
 
 # TODO: batched tensor (metadata doesn't match, so this needs more APIs)
 
 LEVEL = 0
+
 
 @contextlib.contextmanager
 def new_level():
@@ -25,11 +30,13 @@ def new_level():
     finally:
         LEVEL -= 1
 
+
 def unwrap(t, level):
     if isinstance(t, WrapperTensor) and t.level == level:
         return t.elem
     else:
         return t
+
 
 class WrapperTensor(BaseTensor):
     @staticmethod
@@ -75,10 +82,8 @@ class WrapperTensor(BaseTensor):
             else:
                 return t
 
-        return tree_map(
-            wrap,
-            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
-        )
+        return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
+
 
 def grad_and_value(func):
     @functools.wraps(func)
@@ -88,16 +93,22 @@ def grad_and_value(func):
             input = WrapperTensor(input, level)
             input.requires_grad_()
             output = func(input)
-            grad_input, = torch.autograd.grad(output, input, create_graph=True, allow_unused=True)
+            (grad_input,) = torch.autograd.grad(
+                output, input, create_graph=True, allow_unused=True
+            )
             return unwrap(grad_input, level), unwrap(output, level)
+
     return wrapper
+
 
 def grad(func):
     @functools.wraps(func)
     def wrapper(input):
-        grad_input, _  = grad_and_value(func)(input)
+        grad_input, _ = grad_and_value(func)(input)
         return grad_input
+
     return wrapper
+
 
 class FunctorchTest(TestCase):
     def test_basic(self):
@@ -107,8 +118,9 @@ class FunctorchTest(TestCase):
 
     def test_grad_of_grad(self):
         x = torch.randn([])
-        result = grad(grad(lambda x: x ** 3))(x)
+        result = grad(grad(lambda x: x**3))(x)
         self.assertEqual(result, 6 * x)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     run_tests()

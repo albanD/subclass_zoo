@@ -39,12 +39,13 @@
 # from Simple Autograd.
 
 # +
-import torch
-from torch import Tensor
-from typing import List, NamedTuple, Callable, Dict, Optional
 import contextlib
 import functools
 from dataclasses import dataclass
+from typing import Callable, Dict, List, NamedTuple, Optional
+
+import torch
+from torch import Tensor
 
 
 class TapeEntry(NamedTuple):
@@ -1009,6 +1010,7 @@ print("dvb", dvb)
 
 PlainTensor = lambda t: FuncTensor(torch.randn(N), DISPATCHER)
 BatchedTensor = lambda t: FuncTensor(t, Batched(DISPATCHER, length=B))
+
 
 class ScaleBiasModule:
     weight: FuncTensor

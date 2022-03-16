@@ -1,8 +1,8 @@
-import torch
-from torch.utils._pytree import PyTree, tree_flatten, tree_unflatten
-
 import contextlib
 from typing import Any
+
+import torch
+from torch.utils._pytree import PyTree, tree_flatten, tree_unflatten
 
 # Dumping ground for utilities that should eventual make their way into
 # PyTorch proper
@@ -21,14 +21,14 @@ def tree_map2(fn: Any, pytree1: PyTree, pytree2: PyTree) -> PyTree:
     flat_args1, spec1 = tree_flatten(pytree1)
     flat_args2, spec2 = tree_flatten(pytree2)
     assert spec1 == spec2
-    return tree_unflatten(
-        [fn(i, j) for i, j in zip(flat_args1, flat_args2)], spec1)
+    return tree_unflatten([fn(i, j) for i, j in zip(flat_args1, flat_args2)], spec1)
 
 
 # IDK if this is actually useful or not
 def unmake_subclass(tensor):
     with no_dispatch():
         return torch.Tensor._make_subclass(torch.Tensor, tensor)
+
 
 def fill_defaults(args, n, defaults_tail):
     """
@@ -54,5 +54,5 @@ def fill_defaults(args, n, defaults_tail):
         raise RuntimeError("not enough defaults to fill arguments")
     r = list(args)
     for i in range(len(args), n):
-        r.append(defaults_tail[i-n+len(defaults_tail)])
+        r.append(defaults_tail[i - n + len(defaults_tail)])
     return r

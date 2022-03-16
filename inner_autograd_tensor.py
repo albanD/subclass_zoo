@@ -1,11 +1,9 @@
 import torch
-from torch.testing._internal.common_utils import (
-    TestCase, run_tests
-)
-from torch.utils._pytree import tree_map
 import torch.nn.functional
 
 from base_tensor import BaseTensor
+from torch.testing._internal.common_utils import run_tests, TestCase
+from torch.utils._pytree import tree_map
 from utils import fill_defaults
 
 # This file describes how to use wrapper tensors (ala TrivialTensorViaComposition)
@@ -20,6 +18,7 @@ from utils import fill_defaults
 # functionality, so this is mostly a question of whether or not you want to
 # target the public Python API, or the internal ATen operators API
 # (torch.ops.aten).
+
 
 class InnerAutogradTensor(BaseTensor):
     @staticmethod
@@ -49,7 +48,11 @@ class InnerAutogradTensor(BaseTensor):
         def wrap(t):
             # Micro-optimization: not necessary to rewrap if the output tensor
             # doesn't require gradients
-            if isinstance(t, torch.Tensor) and not isinstance(t, cls) and t.requires_grad:
+            if (
+                isinstance(t, torch.Tensor)
+                and not isinstance(t, cls)
+                and t.requires_grad
+            ):
                 return cls(t)
             else:
                 return t
@@ -57,16 +60,16 @@ class InnerAutogradTensor(BaseTensor):
         # Override gradient behavior
         if func == torch.ops.aten.embedding.default:
             args = fill_defaults(args, 5, [-1, False, False])
-            weight, indices, padding_idx, scale_grad_by_freq, _sparse = map(unwrap, args)
+            weight, indices, padding_idx, scale_grad_by_freq, _sparse = map(
+                unwrap, args
+            )
             assert not kwargs
             # Force sparse gradients.  We could have also done this by
             # defining a custom autograd function.
             return cls(func(weight, indices, padding_idx, scale_grad_by_freq, True))
 
-        return tree_map(
-            wrap,
-            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
-        )
+        return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
+
 
 class InnerAutogradTensorTest(TestCase):
     def test_basic(self):
@@ -84,7 +87,7 @@ class InnerAutogradTensorTest(TestCase):
         self.assertEqual(x.grad, torch.tensor([2.0]))  # two uses!
 
     def test_embedding(self):
-        input = torch.tensor([[1,2,4,5],[4,3,2,9]])
+        input = torch.tensor([[1, 2, 4, 5], [4, 3, 2, 9]])
         weights = torch.rand(10, 3, requires_grad=True)
         embedding_matrix = InnerAutogradTensor(weights)
         r = torch.nn.functional.embedding(input, embedding_matrix)
@@ -105,5 +108,6 @@ class InnerAutogradTensorTest(TestCase):
         with self.assertRaisesRegex(RuntimeError, "Bad mixup of autograd level"):
             x = InnerAutogradTensor(w1) + w2
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     run_tests()

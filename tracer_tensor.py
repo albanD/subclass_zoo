@@ -1,13 +1,14 @@
+from types import FunctionType
+
 import torch
+from base_tensor import BaseTensor
 from torch import Tensor
-from torch.fx import Tracer, GraphModule, Graph
+from torch.fx import Graph, GraphModule, Tracer
 from torch.fx.passes.shape_prop import _extract_tensor_metadata
+from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
-from torch.testing._internal.common_utils import TestCase, run_tests
 
 from utils import no_dispatch, tree_map2
-from types import FunctionType
-from base_tensor import BaseTensor
 
 """
 TracerTensor is a tensor that traces ATen operations that are performed on it
@@ -40,6 +41,7 @@ aware of:
     torch.jit.trace, except that it outputs FX IR rather than TorchScript IR. 
 """
 
+
 class TracerTensor(BaseTensor):
     # We support autograd-ing through the TracerTensor (which you
     # really can think of as a good old fashioned tensor that also
@@ -55,7 +57,7 @@ class TracerTensor(BaseTensor):
         self.proxy = proxy
         # Since the proxy is associated with a concrete Tensor object, we also
         # know exactly what its tensor metadata should be, so populate it
-        proxy.node.meta['tensor_meta'] = _extract_tensor_metadata(self)
+        proxy.node.meta["tensor_meta"] = _extract_tensor_metadata(self)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
@@ -76,9 +78,7 @@ class TracerTensor(BaseTensor):
         r = super().__torch_dispatch__(func, types, args, kwargs)
 
         # Run the computation on FX proxies to record it into graph
-        r_proxy = func(
-            *tree_map(unwrap_proxy, args),
-            **tree_map(unwrap_proxy, kwargs))
+        r_proxy = func(*tree_map(unwrap_proxy, args), **tree_map(unwrap_proxy, kwargs))
 
         # NB: we cannot zip r and r_proxy, or rely on r_proxy knowing its
         # structure, because r_proxy as implemented in FX typically is a proxy
@@ -114,7 +114,7 @@ class DispatchTracer(Tracer):
         self.root = torch.nn.Module()
         fn = root
 
-        tracer_cls = getattr(self, '__class__', None)
+        tracer_cls = getattr(self, "__class__", None)
         self.graph = Graph(tracer_cls=tracer_cls)
         # Don't support module, so tensor_attrs is always empty
         self.tensor_attrs = {}
@@ -124,11 +124,14 @@ class DispatchTracer(Tracer):
         # different as we always expect concrete arguments to be provided
         # and we still generate placeholders for each of them.
         cnt = 0
+
         def replace_tracer(arg):
             nonlocal cnt
             cnt += 1
             # TODO: add back argument name sniffing
-            return TracerTensor(arg, self.create_proxy('placeholder', f'arg_{str(cnt)}', (), {}))
+            return TracerTensor(
+                arg, self.create_proxy("placeholder", f"arg_{str(cnt)}", (), {})
+            )
 
         # TODO: generalize to tree_map (but this will make verifier_tensor
         # harder to implement)
@@ -136,8 +139,13 @@ class DispatchTracer(Tracer):
 
         result = fn(*args)
 
-        self.create_node('output', 'output', (self.create_arg(result.proxy),), {},
-                         type_expr=fn.__annotations__.get('return', None))
+        self.create_node(
+            "output",
+            "output",
+            (self.create_arg(result.proxy),),
+            {},
+            type_expr=fn.__annotations__.get("return", None),
+        )
 
         self.submodule_paths = None
 
@@ -147,6 +155,7 @@ class DispatchTracer(Tracer):
         with no_dispatch():
             unwrapped_result = result.view(result.shape)
         return unwrapped_result, self.graph
+
 
 def dispatch_trace(root, concrete_args):
     tracer = DispatchTracer()
@@ -160,24 +169,29 @@ class TracerTensorTest(TestCase):
         r, g = dispatch_trace(lambda x, y: x + y, (torch.ones(2), torch.ones(2)))
         self.assertNotIsInstance(r, TracerTensor)
         self.assertEqual(r, torch.tensor([2.0, 2.0]))
-        self.assertExpectedInline(str(g.graph), """\
+        self.assertExpectedInline(
+            str(g.graph),
+            """\
 graph():
     %arg_1 : [#users=1] = placeholder[target=arg_1]
     %arg_2 : [#users=1] = placeholder[target=arg_2]
     %add : [#users=1] = call_function[target=torch.ops.aten.add](args = (%arg_1, %arg_2), kwargs = {})
-    return add""")
+    return add""",
+        )
 
     def test_constant(self):
         x = torch.ones(2)
         _, g = dispatch_trace(lambda y: x + y, (torch.ones(2),))
-        self.assertExpectedInline(str(g.graph), """\
+        self.assertExpectedInline(
+            str(g.graph),
+            """\
 graph():
     %arg_1 : [#users=1] = placeholder[target=arg_1]
     %_tensor_constant0 : [#users=1] = get_attr[target=_tensor_constant0]
     %add : [#users=1] = call_function[target=torch.ops.aten.add](args = (%_tensor_constant0, %arg_1), kwargs = {})
-    return add""")
+    return add""",
+        )
 
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_tests()

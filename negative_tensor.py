@@ -1,12 +1,12 @@
+import unittest
+
 import torch
 from torch import Tensor
 from torch.autograd import Function
+from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
-from torch.testing._internal.common_utils import TestCase, run_tests
 
 from utils import no_dispatch
-
-import unittest
 
 
 # This is a reimplementation of "negative tensor views" as currently
@@ -76,6 +76,7 @@ class NegativeTensor(Tensor):
                     return t.neg()
             else:
                 return t
+
         return func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
 
 
@@ -112,20 +113,20 @@ class NegativeTensorTest(TestCase):
         # The direct constructor is not valid in autograd contexts; you must
         # use negative_view
         self.assertRaises(
-            Exception,
-            lambda: NegativeTensor(torch.empty(1, requires_grad=True)))
+            Exception, lambda: NegativeTensor(torch.empty(1, requires_grad=True))
+        )
         self.assertRaises(
-            Exception,
-            lambda: NegativeTensor(torch.empty(1, requires_grad=True).sum()))
+            Exception, lambda: NegativeTensor(torch.empty(1, requires_grad=True).sum())
+        )
         negative_view(torch.empty(1, requires_grad=True))
         negative_view(torch.empty(1, requires_grad=True).sum())
 
         # The tensor is aliases with its original
-        x = torch.tensor(1.)
+        x = torch.tensor(1.0)
         y = negative_view(x)
-        self.assertEqual(y, torch.tensor(-1.))
+        self.assertEqual(y, torch.tensor(-1.0))
         x.add_(1)
-        self.assertEqual(y, torch.tensor(-2.))
+        self.assertEqual(y, torch.tensor(-2.0))
 
     def test_repr(self):
         x = negative_view(torch.tensor(1))
@@ -135,8 +136,11 @@ class NegativeTensorTest(TestCase):
         self.assertExpectedInline(repr(x), """tensor(-1)""")
 
         # physical_repr tells you if something funny is going on
-        self.assertExpectedInline(x.physical_repr(), """\
-negative_view(tensor(1))""")
+        self.assertExpectedInline(
+            x.physical_repr(),
+            """\
+negative_view(tensor(1))""",
+        )
 
     def test_functional(self):
         self.assertEqual(negative_view(torch.tensor(1)) + 1, torch.tensor(0))
@@ -191,5 +195,5 @@ negative_view(tensor(1))""")
         self.assertEqual(base.grad, torch.tensor([-1.0]))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_tests()

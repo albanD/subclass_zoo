@@ -1,14 +1,17 @@
+import weakref
+
 import torch
-from torch import Tensor
-from torch.utils._pytree import tree_map
-from torch.testing._internal.common_utils import (
-    TestCase, run_tests, disable_gc, parametrize,
-    instantiate_parametrized_tests
-)
 
 from base_tensor import BaseTensor
-
-import weakref
+from torch import Tensor
+from torch.testing._internal.common_utils import (
+    disable_gc,
+    instantiate_parametrized_tests,
+    parametrize,
+    run_tests,
+    TestCase,
+)
+from torch.utils._pytree import tree_map
 
 # In a lot of use cases for tensor subclasses, there is a concept
 # of an "inner" tensor, which is a normal, non-subclassed tensor
@@ -36,7 +39,6 @@ import weakref
 # copy paste them into their own functions.
 #
 # TODO: Redo these examples with compositionality in mind.
-
 
 
 class TrivialTensorViaInheritance(BaseTensor):
@@ -130,16 +132,17 @@ class TrivialTensorViaComposition(BaseTensor):
             else:
                 return t
 
-        return tree_map(
-            wrap,
-            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
-        )
+        return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
 
 
-parametrize_trivial = parametrize('TrivialTensor', [
-    TrivialTensorViaInheritance,
-    TrivialTensorViaComposition,
-], name_fn=lambda x: x.__name__)
+parametrize_trivial = parametrize(
+    "TrivialTensor",
+    [
+        TrivialTensorViaInheritance,
+        TrivialTensorViaComposition,
+    ],
+    name_fn=lambda x: x.__name__,
+)
 
 
 # We run our tests on both formulations of trivial tensors to show that
@@ -167,15 +170,15 @@ class TrivialTensorTest(TestCase):
         # NB: this is not so basic, this executes a shit ton of
         # ops, including inplace ops
         self.assertEqual(
-            (TrivialTensor(torch.tensor(1.0)) +
-             TrivialTensor(torch.tensor(2.0))),
-            TrivialTensor(torch.tensor(3.0)))
+            (TrivialTensor(torch.tensor(1.0)) + TrivialTensor(torch.tensor(2.0))),
+            TrivialTensor(torch.tensor(3.0)),
+        )
 
 
 instantiate_parametrized_tests(TrivialTensorTest)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_tests()
 
 
