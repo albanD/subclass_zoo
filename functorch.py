@@ -5,10 +5,7 @@ import functools
 import torch
 from base_tensor import BaseTensor
 from torch import Tensor
-from torch.testing._internal.common_utils import (
-    run_tests,
-    TestCase,
-)
+from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
 
 from utils import no_dispatch

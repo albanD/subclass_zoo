@@ -66,6 +66,7 @@ def fill_defaults(args, n, defaults_tail):
         r.append(defaults_tail[i - n + len(defaults_tail)])
     return r
 
+
 class PythonMetaTensorMode(torch.Tensor):
     # TODO: figure out a better idiom for this; "pure" modes shouldn't be
     # instantiated so arguably they shouldn't be torch.Tensor subclasses,
@@ -345,7 +346,9 @@ class PythonMetaTensorMode(torch.Tensor):
 
         # TODO: aten._local_scalar_dense.default is special, you can't
         # implement it, add a special case for it
-        raise NotImplementedError(f"no meta implementation for {func} aka {func._schema}")
+        raise NotImplementedError(
+            f"no meta implementation for {func} aka {func._schema}"
+        )
 
 
 class PythonMetaTensor(PythonMetaTensorMode):

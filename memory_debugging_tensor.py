@@ -1,11 +1,11 @@
+import unittest
 import weakref
 from collections import defaultdict
-import unittest
 
 import torch
+from torch.testing._internal.common_cuda import TEST_CUDA
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
-from torch.testing._internal.common_cuda import TEST_CUDA
 
 alive_tensors = weakref.WeakValueDictionary()
 
