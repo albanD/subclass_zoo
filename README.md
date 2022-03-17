@@ -55,3 +55,8 @@ TODO
 
 * Compositionality
   * TODO: suppress elem in init
+
+## Developer notes
+
+* This repo is formatted with ufmt and autoflakes.  Use `./format.sh` to
+  reformat all the files in this repository.
