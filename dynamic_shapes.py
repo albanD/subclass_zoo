@@ -286,6 +286,53 @@ def assert_int_eq(x: SymInt, y: SymInt):
 # For now, we assume that if you have a SymInt, it could be anything
 # (we NEVER learn anything when we do shape computations).
 
+
+# One specialization poses a particular problem because we are required
+# to do some amount of reasoning to determine if broadcasting should
+# occur or not.  Suppose x has size (s0,) and y has size (s1,), and
+# we have:
+#
+# ```
+# assert x.shape[0] == 1
+# return x + y
+# ```
+#
+# Does broadcasting occur on this addition?  A user might reasonably
+# expect that after this assertion, surely broadcasting should occur,
+# but to actually figure this out in the context of symbolic tracing,
+# we need to do the teeniest bit of symbolic reasoning.  Unification
+# suffices for this example: after the assertion, we now know that
+# x.shape[0] is "definitely one", and we can rely on this information
+# to perform a broadcast.
+#
+# The trouble is, it's not well specified *how much* symbolic reasoning
+# we should be willing to do.  It seems that unification is necessary,
+# lest obvious instances of transitivity don't work (x == 1, y == x, z
+# == y, operations on z should broadcast).  On the flip side, we
+# shouldn't be in the business of proving arbitrary mathematical
+# theorems (or even shelling to Z3) to figure out if a value is always
+# one in some context.  But what about a ResNet style architecture,
+# where the output size of layers gets reduced and reduced until it
+# hits 1; should we be able to infer that the output of a ResNet in this
+# case is size 1 and eligible for broadcasting?  (Does this even matter,
+# since the input sizes in such networks are typically static and we
+# wouldn't have a dynamic shape in this case anyway?)  To definitively
+# answer these questions would require an analysis of broadcasting usage
+# in the wild (or perhaps an analysis of networks with dynamic sizes.)
+#
+# There is an out, however.  If our symbolic reasoning is insufficient
+# for a user, they can always add an assert that a shape in question is
+# one to force broadcasting to occur in that case.  The crux of the
+# problem here is letting a user know that this is what they ought
+# to do; if two tensors don't broadcast with each other, we may just
+# require their sizes to be the same; but it might not be obvious
+# (without the help of a solver like Z3) that two symbolic sizes are
+# different.  If we lowered to an IR with non-broadcasting operations,
+# this will manifest at runtime where we'll say "Couldn't add tensors
+# with sizes 1 and N" (even though the surface language supported
+# broadcasting).  So you want to help the user out here with a better
+# error message, in that case.
+
 def definitely_one(x):
     return isinstance(x, int) and x == 1
 
