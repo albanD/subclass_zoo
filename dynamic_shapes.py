@@ -50,6 +50,11 @@ var_add = Op("var_add")
 var_mul = Op("var_mul")
 var_sum = Op("var_sum")
 var_expand = Op("var_expand")
+var_nonzero_impl = Op("var_nonzero_impl")
+var_index = Op("var_index")  # aka x[i]
+var_index_backward = Op("var_index_backward")
+var_squeeze = Op("squeeze")
+var_unsqueeze = Op("unsqueeze")
 
 def register(d, k):
     def inner(f):
@@ -62,11 +67,25 @@ INTERP_RULES = {}
 def interp_int_assert_eq(x: int, y: int):
     assert x == y
 
+# unlike nonzero, this also returns the symbolic shape
+# because this is an "existential telescope" the fresh shape gotta come
+# first
+@register(INTERP_RULES, var_nonzero_impl)
+def interp_var_nonzero_impl(x: torch.Tensor):
+    r = torch.nonzero(x)
+    return r.shape[0], r
+
+INTERP_RULES[var_index] = lambda t, i: t[i]
+# NB: this is inefficient: t's data doesn't to be retained to allocate
+# the zeros, only the dtype (actually technically inferrable from g) and size
+INTERP_RULES[var_index_backward] = lambda t, i, g: torch.zeros_like(t).index_put((i,), g, accumulate=True)
 INTERP_RULES[var_constant] = lambda *, val: val
 INTERP_RULES[var_add] = lambda x, y: x + y
 INTERP_RULES[var_mul] = lambda x, y: x * y
 INTERP_RULES[var_sum] = lambda x: x.sum()
 INTERP_RULES[var_expand] = lambda x, sizes: x.expand(sizes)
+INTERP_RULES[var_squeeze] = lambda x, *, dim: x.squeeze(dim)
+INTERP_RULES[var_unsqueeze] = lambda x, *, dim: x.unsqueeze(dim)
 
 # There's a little bit of choice in the IR representation.  I chose to
 # allow for complicated atoms to make the IR easier to read (no
@@ -120,24 +139,31 @@ def tuplify(outs):
     else:
         return (outs,)
 
-def interpretAtom(atom: Atom, env: Dict[str, Any]):
+def interp_atom(atom: Atom, env: Dict[str, Any]):
     if isinstance(atom, str):
-        return env[str]
+        return env[atom]
     elif isinstance(atom, tuple):
-        return tuple(interpretAtom(a) for a in atom)
+        return tuple(interp_atom(a, env) for a in atom)
     else:
         return atom
 
-def interpretInputs(inputs: List[Atom], env: Dict[str, Any]):
-    return tuple(interpretAtom(i, env) for i in inputs)
+def interp_inputs(inputs: List[Atom], env: Dict[str, Any]):
+    return tuple(interp_atom(i, env) for i in inputs)
 
 # mutates env
-def interpretNode(n: Node, env: Dict[str, Any]):
-    args = tuple(env[k] for k in n.inputs)
+def interp_node(n: Node, env: Dict[str, Any]):
+    args = tuple(interp_atom(i, env) for i in n.inputs)
     outs = tuplify(INTERP_RULES[n.op](*args, **n.params))
     assert len(outs) == len(n.outputs)
     for k, v in zip(n.outputs, outs):
         env[k] = v
+
+def interp_graph(init: Dict[Union["Variable", "SymbolicIntNode"], Any], **outs):
+    env = {k.name: v for k, v in init.items()}
+    for n in CURRENT_GRAPH.nodes:
+        interp_node(n, env)
+    for k, v in outs.items():
+        print(f"{k} = {env[v.name]}")
 
 # Let's work on symbolics
 
@@ -232,8 +258,8 @@ def record_arg(a):
         assert isinstance(a, (Variable, SymbolicIntNode))
         return a.name
 
-def record_var(op, shape, *args, name=None, **kwargs):
-    r = Variable(shape, name=name)
+def record_var(op, shape, dtype, *args, name=None, **kwargs):
+    r = Variable(shape, dtype, name=name)
     n = Node(op, tuple(record_arg(a) for a in args), [r.name], kwargs)
     print(f'{n} : {r.shape}')
     CURRENT_GRAPH.nodes.append(n)
@@ -246,8 +272,8 @@ def record_none(op, *args, **kwargs):
 
 class SymbolicIntNode:
     name: str
-    def __init__(self):
-        self.name = fresh_int()
+    def __init__(self, name=None):
+        self.name = name or fresh_int()
     def __repr__(self):
         return self.name
 
@@ -355,9 +381,11 @@ def assert_shape_broadcast(lhs, rhs):
 class Variable:
     shape: List[Union[SymInt, int]]
     name: str
+    dtype: torch.dtype
 
-    def __init__(self, shape, name: str=None):
+    def __init__(self, shape, dtype: torch.dtype, *, name: str=None):
         self.shape = shape
+        self.dtype = dtype
         self.name = name or fresh_var()
 
     def dim(self):
@@ -367,7 +395,7 @@ class Variable:
     # inside the autograd. This function constructs leaf nodes. 
     @staticmethod
     def constant(value: torch.Tensor, name: str=None):
-        return record_var(var_constant, tuple(value.shape), val=value)
+        return record_var(var_constant, tuple(value.shape), value.dtype, val=value)
 
     def __repr__(self):
         return f"{self.name}: {self.shape}"
@@ -386,6 +414,24 @@ class Variable:
     def expand(self, sizes: List[SymInt]) -> 'Variable':
         return operator_expand(self, sizes)
 
+    def nonzero(self) -> 'Variable':
+        return operator_nonzero(self)
+
+    def squeeze(self, dim: int) -> 'Variable':
+        return operator_squeeze(self, dim)
+
+    def unsqueeze(self, dim: int) -> 'Variable':
+        return operator_unsqueeze(self, dim)
+
+    def zeros_like(self) -> 'Variable':
+        return zeros_like(self)
+
+    def __getitem__(self, index) -> 'Variable':
+        return operator_index(self, index)
+
+    def index_backward(self, index, grad_output) -> 'Variable':
+        return operator_index_backward(self, index, grad_output)
+
 class TapeEntry(NamedTuple):
     # names of the inputs to the original computation
     inputs : List[str]
@@ -396,10 +442,11 @@ class TapeEntry(NamedTuple):
 
 gradient_tape : List[TapeEntry] = []
 
-def reset_tape():
+def reset():
   gradient_tape.clear()
-  global _name
-  _name = 0 # reset variable names too to keep them small.
+  fresh_var.fresh = 0
+  fresh_int.fresh = 0
+  CURRENT_GRAPH.nodes.clear()
 
 def operator_mul(self : Variable, rhs: Variable) -> Variable:
     if isinstance(rhs, float) and rhs == 1.0:
@@ -407,9 +454,10 @@ def operator_mul(self : Variable, rhs: Variable) -> Variable:
         return self
 
     # define forward
-    # (no broadcasting)
     shape = assert_shape_broadcast(self, rhs)
-    r = record_var(var_mul, shape, self, rhs)
+    # no type promotion
+    assert self.dtype == rhs.dtype
+    r = record_var(var_mul, shape, self.dtype, self, rhs)
 
     # record what the inputs and outputs of the op were
     inputs = [self.name, rhs.name]
@@ -475,7 +523,8 @@ def operator_add(self : Variable, rhs: Variable) -> Variable:
     # Add follows a similar pattern to Mul, but it doesn't end up
     # capturing any variables.
     shape = assert_shape_broadcast(self, rhs)
-    r = record_var(var_add, shape, self, rhs)
+    assert self.dtype == rhs.dtype  # no type promotion
+    r = record_var(var_add, shape, self.dtype, self, rhs)
     def propagate(dL_doutputs: List[Variable]):
         dL_dr, = dL_doutputs
         dr_dself = 1.0
@@ -491,7 +540,7 @@ def operator_add(self : Variable, rhs: Variable) -> Variable:
 # is closed under differentiation. Both have rules similar to mul above.
 
 def operator_sum(self: Variable, name: Optional[str]) -> 'Variable':
-    r = record_var(var_sum, (), self, name=name)
+    r = record_var(var_sum, (), self.dtype, self, name=name)
     def propagate(dL_doutputs: List[Variable]):
         dL_dr, = dL_doutputs
         size = self.shape
@@ -502,11 +551,77 @@ def operator_sum(self: Variable, name: Optional[str]) -> 'Variable':
 
 def operator_expand(self: Variable, sizes: List[SymInt]) -> 'Variable':
     assert self.dim() == 0 # only works for scalars
-    r = record_var(var_expand, sizes, self, sizes)
+    r = record_var(var_expand, sizes, self.dtype, self, sizes)
     def propagate(dL_doutputs: List[Variable]):
         dL_dr, = dL_doutputs
         return [dL_dr.sum()]
     gradient_tape.append(TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate))
+    return r
+
+def operator_nonzero(self: Variable) -> 'Variable':
+    s = SymbolicIntNode()
+    r = Variable((s, self.dim()), torch.long)
+    n = Node(var_nonzero_impl, (self.name,), [s.name, r.name])
+    print(f'{n} : {r.shape}')
+    CURRENT_GRAPH.nodes.append(n)
+    return r
+
+def operator_index(self: Variable, index: Variable) -> 'Variable':
+    assert isinstance(index, Variable)  # no slices support
+    assert index.dtype == torch.long  # integer indexing only
+    assert index.dim() == 1  # 1D index only
+    r = record_var(var_index, (index.shape[0],) + self.shape[1:], self.dtype, self, index)
+    def propagate(dL_doutputs: List[Variable]):
+        dL_dr, = dL_doutputs
+        return [self.index_backward(index, dL_dr)]
+    # NB: index not recorded on tape as it is nondifferentiable
+    gradient_tape.append(TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate))
+    return r
+
+def operator_index_backward(self: Variable, index: Variable, grad_output: Variable) -> 'Variable':
+    assert isinstance(index, Variable)
+    assert index.dtype == torch.long  # integer indexing only
+    assert index.dim() == 1  # 1D index only
+    assert_int_eq(grad_output.shape[0], index.shape[0])
+    # no broadcasting
+    for i in range(1, len(self.shape)):
+        assert_int_eq(self.shape[i], grad_output.shape[i])
+    r = record_var(var_index_backward, self.shape, self.dtype, self, index, grad_output)
+    def propagate(dL_doutputs: List[Variable]):
+        dL_dr, = dL_doutputs
+        return [dL_dr[index]]
+    # NB: self and index not recorded as they are nondifferentiable
+    gradient_tape.append(TapeEntry(inputs=[grad_output.name], outputs=[r.name], propagate=propagate))
+    return r
+
+def operator_squeeze(self: Variable, dim: int) -> 'Variable':
+    # Technically, squeeze is supposed to noop if the dimension isn't
+    # size 1.  But if the shape in question is dynamic we don't
+    # know if it is one or not.  For now, we just assert that it has to
+    # be size 1 and reduce, but technically we should use definitely_one
+    # to go between behavior
+    assert_int_eq(self.shape[dim], 1)
+    r = record_var(var_squeeze, self.shape[0:dim] + self.shape[dim+1:], self.dtype, self, dim=dim)
+    def propagate(dL_doutputs: List[Variable]):
+        (dL_dr,) = dL_outputs
+        # NB: This is only the backwards if a squeeze actually occurs
+        return [dL_dr.unsqueeze(dim)]
+
+    gradient_tape.append(
+        TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate)
+    )
+    return r
+
+def operator_unsqueeze():
+    assert_int_eq(self.shape[dim], 1)
+    r = record_var(var_unsqueeze, self.shape[0:dim] + (1,) + self.shape[dim:], self.dtype, self, dim=dim)
+    def propagate(dL_doutputs: List[Variable]):
+        (dL_dr,) = dL_outputs
+        return [dL_dr.squeeze(dim)]
+
+    gradient_tape.append(
+        TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate)
+    )
     return r
 
 def simple(a, b):
@@ -515,27 +630,45 @@ def simple(a, b):
 
 # Let's first do the gradient computation with constants
 
-reset_tape() # reset any compute from other cells
-a_global, b_global = torch.rand(4), torch.rand(4)
-a = Variable.constant(a_global, name='a')
-b = Variable.constant(b_global, name='b')
+torch.manual_seed(0)
+
+reset() # reset any compute from other cells
+a = Variable((4,), dtype=torch.float, name='a')
+b = Variable((4,), dtype=torch.float, name='b')
 loss = simple(a, b)
 da, db = grad(loss, [a, b])
-print("da", da)
-print("db", db)
+interp_graph({a: torch.randn(4), b: torch.randn(4)}, da=da, db=db)
 
 # Now let's do it again but symbolic
 
 print("===========")
-reset_tape()
-s1 = SymbolicIntNode()
-s2 = SymbolicIntNode()
-s3 = SymbolicIntNode()
-a = Variable((s1, s2))
-b = Variable((s1, s3))
-print("a", a)
-print("b", b)
+reset()
+s1 = SymbolicIntNode(name="s1")
+s2 = SymbolicIntNode(name="s2")
+s3 = SymbolicIntNode(name="s3")
+a = Variable((s1, s2), dtype=torch.float)
+b = Variable((s1, s3), dtype=torch.float)
 loss = simple(a, b).sum()
 da, db = grad(loss, [a, b])  # expand can take symbolic sizes as argument
-print("da", da)
-print("db", db)
+interp_graph({s1: 4, s2: 3, s3: 3, a: torch.randn(4,3), b: torch.randn(4,3)}, da=da, db=db)
+
+
+# Let's show that indexing works
+print("===========")
+reset()
+a = Variable((2, 3), dtype=torch.float)
+i = Variable((4,), dtype=torch.long)
+loss = a[i].sum()
+da, = grad(loss, [a])
+interp_graph({a: torch.randn(2, 3), b: torch.tensor([0,0,0,1])}, da=da)
+
+
+# Let's now do a nontrivial symbolic case, where we index based on the
+# result of nonzero
+print("===========")
+reset()
+a = Variable((6,), dtype=torch.float)
+i = a.nonzero().squeeze(1)
+loss = a[i].sum(name='L0')
+da, = grad(loss, [a])
+interp_graph({a: torch.clamp(torch.randn(6), min=0)}, da=da)

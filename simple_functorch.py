@@ -1035,3 +1035,32 @@ print(
     "expect", input.tensor.unsqueeze(0) * m.weight.tensor + m.bias.tensor.unsqueeze(0)
 )
 print("output", output.tensor)
+
+# Autodidax decoder ring
+#
+# Tracer = FuncTensor
+#   can be subclassed for storing extra data (JVPTracer, BatchTracer)
+# AbstractValue = this represents the "dtype" and the "sizes", etc (stored on Tracer)
+#   It's a type! But it also has sizes (like a meta tensor)
+#   ShapedArray/ConcreteArray (distinguish between device and meta
+#   tensor) ~> going to bind
+#   ...not really Dispatcher; represents the dtype/size stuff
+# MainTrace = Dispatcher (as stored in DISPATCHER stack) (why do they
+#   also need Trace? Weird.  as seen in jvp_v1 they first new_main
+#   and then wrap it in JVPTrace)
+# Trace = Dispatcher (the thing that gets subclassed to have
+#   implementations, e.g., EvalTrace, JVPTrace)
+#   pure = take a constant and make the Tracer for it
+#   lift = take an inner Tracer and make it this level
+#
+# new_main ~> dispatcher, gives you the Dispatcher/MainTrace
+# get_aval(t) ~> getting the dtype/size metadata stuff
+# bind ~> inlined in FuncTensor methods, including lift_and_unwrap_args
+# full_lower ~> not implemented
+# full_raise ~> lift
+# find_top_trace ~> lift_and_unwrap_args
+#
+# dynamic_trace ~> the thing that pushes jit to the bottom
+#
+# jitting gives you an xla_call_p, which STORES the jaxpr
+#   transforms look into the jaxpr and retrace it with the transform
