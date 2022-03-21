@@ -13,17 +13,6 @@
 #     name: python3
 # ---
 
-import functools
-import itertools
-import traceback
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
-
-import torch
-
-torch.manual_seed(0)
-
 # This notebook implements rank specialized dynamic shapes on [Simple
 # Autograd](https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing)
 # The goal is to have an easy to hack on prototype of dynamic shapes
@@ -40,13 +29,26 @@ torch.manual_seed(0)
 # this shape isn't 1024, it can vary, don't make assumptions based on it
 # happening to be 1024 this time.)
 
+# +
+import functools
+import itertools
+import traceback
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
+
+import torch
+
+torch.manual_seed(0)
+# -
+
 # To get started, we define some utility functions the autograd
 # implementation.  FreshSupply lets us generate fresh names for
 # variables and symbolic integers in our program (for clarity,
 # we give them separate prefixes: v for variable, i for integer).
 # `gradient_tape` contains the global autograd tape for our
 # program; for more details, read the exposition in [Simple
-# Autograd](https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing)
+# Autograd](https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing).
 
 
 # +
