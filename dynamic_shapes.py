@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 
-from typing import List, NamedTuple, Callable, Dict, Optional, Union, Any, Tuple
-import torch
-from dataclasses import dataclass, field
 import functools
 import itertools
-from enum import Enum
 import traceback
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
+
+import torch
 
 torch.manual_seed(0)
 
@@ -40,29 +41,36 @@ torch.manual_seed(0)
 class FreshSupply:
     prefix: str
     fresh: int = 0
+
     def __call__(self):
-        r = f'{self.prefix}{self.fresh}'
+        r = f"{self.prefix}{self.fresh}"
         self.fresh += 1
         return r
 
-fresh_var = FreshSupply('v')
-fresh_int = FreshSupply('i')
+
+fresh_var = FreshSupply("v")
+fresh_int = FreshSupply("i")
+
 
 class TapeEntry(NamedTuple):
     # names of the inputs to the original computation
-    inputs : List[str]
+    inputs: List[str]
     # names of the outputs of the original computation
     outputs: List[str]
     # apply chain rule
-    propagate: 'Callable[List[Variable], List[Variable]]'
+    propagate: "Callable[List[Variable], List[Variable]]"
 
-gradient_tape : List[TapeEntry] = []
+
+gradient_tape: List[TapeEntry] = []
+
 
 def reset():
-  gradient_tape.clear()
-  fresh_var.fresh = 0
-  fresh_int.fresh = 0
-  CURRENT_GRAPH.nodes.clear()
+    gradient_tape.clear()
+    fresh_var.fresh = 0
+    fresh_int.fresh = 0
+    CURRENT_GRAPH.nodes.clear()
+
+
 # -
 
 # The raison d'etre of dynamic shapes is for graph capture, and so to
@@ -74,11 +82,14 @@ def reset():
 
 # +
 
+
 @dataclass(frozen=True)
 class Op:
     name: str
+
     def __str__(self):
         return self.name
+
 
 # In this example, we only have asserts over integers, but you could
 # imagine other integer operations, e.g., addition, for handling
@@ -114,16 +125,21 @@ var_unsqueeze = Op("unsqueeze")
 
 # +
 
+
 def register(d, k):
     def inner(f):
         d[k] = f
+
     return inner
 
+
 INTERP_RULES = {}
+
 
 @register(INTERP_RULES, int_assert_eq)
 def interp_int_assert_eq(x: int, y: int):
     assert x == y
+
 
 # unlike nonzero, this also returns the symbolic shape
 # because this is an "existential telescope" the fresh shape gotta come
@@ -133,11 +149,13 @@ def interp_var_nonzero_impl(x: torch.Tensor):
     r = torch.nonzero(x)
     return r.shape[0], r
 
+
 INTERP_RULES[var_index] = lambda t, i: t[i]
 # NB: this is inefficient: t's data doesn't to be retained to allocate
 # the zeros, only the dtype (actually technically inferrable from g) and size
-INTERP_RULES[var_index_backward] = \
-        lambda t, i, g: torch.zeros_like(t).index_put((i,), g, accumulate=True)
+INTERP_RULES[var_index_backward] = lambda t, i, g: torch.zeros_like(t).index_put(
+    (i,), g, accumulate=True
+)
 INTERP_RULES[var_constant] = lambda *, val: val
 INTERP_RULES[var_add] = lambda x, y: x + y
 INTERP_RULES[var_mul] = lambda x, y: x * y
@@ -162,6 +180,7 @@ INTERP_RULES[var_unsqueeze] = lambda x, *, dim: x.unsqueeze(dim)
 # +
 Atom = Union[str, int, List[Union[str, int]]]
 
+
 def str_atom(a: Atom) -> str:
     if isinstance(a, str):
         return a
@@ -170,11 +189,13 @@ def str_atom(a: Atom) -> str:
     else:
         return f"({', '.join(str_atom(b) for b in a)})"
 
+
 # -
 
 # Our node looks fairly similar to an FX node: given some list of input
 # atoms and a dictionary of arbitrary extra (static) parameters, run
 # an operator on it and bind the results to outputs.
+
 
 @dataclass
 class Node:
@@ -184,24 +205,28 @@ class Node:
     params: Dict[str, Any] = field(default_factory=dict)
 
     def __str__(self):
-        outputs_str = ', '.join(self.outputs)
-        outputs_str += ' = ' if self.outputs else ''
-        inputs_str = ', '.join(str_atom(a) for a in self.inputs)
-        params_str = ', ' if self.inputs and self.params else ''
-        params_str += ', '.join(f'{k}={v}' for k, v in self.params.items())
+        outputs_str = ", ".join(self.outputs)
+        outputs_str += " = " if self.outputs else ""
+        inputs_str = ", ".join(str_atom(a) for a in self.inputs)
+        params_str = ", " if self.inputs and self.params else ""
+        params_str += ", ".join(f"{k}={v}" for k, v in self.params.items())
         return f"{outputs_str}{self.op}({inputs_str}{params_str})"
+
 
 # A graph is simply a list of nodes.  In a real application we may also
 # need some provision for graph-level inputs/outputs, but they aren't
 # necessary for these example so they are omitted.
 
+
 @dataclass
 class Graph:
     nodes: List[Node] = field(default_factory=list)
 
+
 # Now, we can finish our interpreter on graphs.
 
 # +
+
 
 def tuplify(outs):
     if outs is None:
@@ -211,6 +236,7 @@ def tuplify(outs):
     else:
         return (outs,)
 
+
 def interp_atom(atom: Atom, env: Dict[str, Any]):
     if isinstance(atom, str):
         return env[atom]
@@ -219,8 +245,10 @@ def interp_atom(atom: Atom, env: Dict[str, Any]):
     else:
         return atom
 
+
 def interp_inputs(inputs: List[Atom], env: Dict[str, Any]):
     return tuple(interp_atom(i, env) for i in inputs)
+
 
 # Mutates the environment, storing the results into env
 def interp_node(n: Node, env: Dict[str, Any]):
@@ -234,6 +262,7 @@ def interp_node(n: Node, env: Dict[str, Any]):
     for k, v in zip(n.outputs, outs):
         env[k] = v
 
+
 # -
 
 # To put it all together, we have a final `interp_graph` function,
@@ -241,12 +270,14 @@ def interp_node(n: Node, env: Dict[str, Any]):
 # graph recorded at `CURRENT_GRAPH` to compute some output variables
 # (which it then prints.)
 
+
 def interp_graph(init: Dict[Union["Variable", "SymbolicIntNode"], Any], **outs):
     env = {k.name: v for k, v in init.items()}
     for n in CURRENT_GRAPH.nodes:
         interp_node(n, env)
     for k, v in outs.items():
         print(f"{k} = {env[v.name]}")
+
 
 # Phew, that's it for the IR representation.  Let's actually generate
 # some graphs!  We'll maintain a global current graph which we record
@@ -264,19 +295,23 @@ CURRENT_GRAPH = Graph()
 
 # +
 
+
 class SymbolicIntNode:
     name: str
+
     def __init__(self, name=None):
         self.name = name or fresh_int()
+
     def __repr__(self):
         return self.name
+
 
 class Variable:
     shape: List[Union["SymInt", int]]
     name: str
     dtype: torch.dtype
 
-    def __init__(self, shape, dtype: torch.dtype, *, name: str=None):
+    def __init__(self, shape, dtype: torch.dtype, *, name: str = None):
         self.shape = shape
         self.dtype = dtype
         self.name = name or fresh_var()
@@ -285,9 +320,9 @@ class Variable:
         return len(self.shape)
 
     # We need to start with some tensors whose values were not computed
-    # inside the autograd. This function constructs leaf nodes. 
+    # inside the autograd. This function constructs leaf nodes.
     @staticmethod
-    def constant(value: torch.Tensor, name: str=None):
+    def constant(value: torch.Tensor, name: str = None):
         return record_var(var_constant, tuple(value.shape), value.dtype, val=value)
 
     def __repr__(self):
@@ -296,36 +331,37 @@ class Variable:
     # Most of the actual implementations of these operators will be
     # given later.
 
-    def __mul__(self, rhs: 'Variable') -> 'Variable':
+    def __mul__(self, rhs: "Variable") -> "Variable":
         # defined later in the notebook
         return operator_mul(self, rhs)
 
-    def __add__(self, rhs: 'Variable') -> 'Variable':
+    def __add__(self, rhs: "Variable") -> "Variable":
         return operator_add(self, rhs)
 
-    def sum(self, name: Optional[str]=None) -> 'Variable':
+    def sum(self, name: Optional[str] = None) -> "Variable":
         return operator_sum(self, name)
 
-    def expand(self, sizes: List["SymInt"]) -> 'Variable':
+    def expand(self, sizes: List["SymInt"]) -> "Variable":
         return operator_expand(self, sizes)
 
-    def nonzero(self) -> 'Variable':
+    def nonzero(self) -> "Variable":
         return operator_nonzero(self)
 
-    def squeeze(self, dim: int) -> 'Variable':
+    def squeeze(self, dim: int) -> "Variable":
         return operator_squeeze(self, dim)
 
-    def unsqueeze(self, dim: int) -> 'Variable':
+    def unsqueeze(self, dim: int) -> "Variable":
         return operator_unsqueeze(self, dim)
 
-    def zeros_like(self) -> 'Variable':
+    def zeros_like(self) -> "Variable":
         return zeros_like(self)
 
-    def __getitem__(self, index) -> 'Variable':
+    def __getitem__(self, index) -> "Variable":
         return operator_index(self, index)
 
-    def index_backward(self, index, grad_output) -> 'Variable':
+    def index_backward(self, index, grad_output) -> "Variable":
         return operator_index_backward(self, index, grad_output)
+
 
 # -
 
@@ -351,6 +387,7 @@ SymInt = Union[SymbolicIntNode, int]
 
 # +
 
+
 def record_arg(a):
     if isinstance(a, tuple):
         return tuple(record_arg(b) for b in a)
@@ -360,10 +397,12 @@ def record_arg(a):
         assert isinstance(a, (Variable, SymbolicIntNode))
         return a.name
 
+
 def record_none(op, *args, **kwargs):
     n = Node(op, tuple(record_arg(a) for a in args), [], kwargs)
     print(n)
     CURRENT_GRAPH.nodes.append(n)
+
 
 def record_int(op, *args, **kwargs):
     i = SymbolicIntNode()
@@ -372,10 +411,13 @@ def record_int(op, *args, **kwargs):
     CURRENT_GRAPH.nodes.append(n)
     return i
 
-def record_var(op, shape: Tuple[SymInt, ...], dtype: torch.dtype, *args, name=None, **kwargs):
+
+def record_var(
+    op, shape: Tuple[SymInt, ...], dtype: torch.dtype, *args, name=None, **kwargs
+):
     r = Variable(shape, dtype, name=name)
     n = Node(op, tuple(record_arg(a) for a in args), [r.name], kwargs)
-    print(f'{n} : {r.shape}')
+    print(f"{n} : {r.shape}")
     CURRENT_GRAPH.nodes.append(n)
     return r
 
@@ -388,13 +430,19 @@ def record_var(op, shape: Tuple[SymInt, ...], dtype: torch.dtype, *args, name=No
 # equal or not, so we just record an assertion in the graph to be
 # verified later at runtime.
 
+
 def assert_int_eq(x: SymInt, y: SymInt):
     # peephole optimization
-    if isinstance(x, SymbolicIntNode) and isinstance(y, SymbolicIntNode) and x.name == y.name:
+    if (
+        isinstance(x, SymbolicIntNode)
+        and isinstance(y, SymbolicIntNode)
+        and x.name == y.name
+    ):
         return
     if isinstance(x, int) and isinstance(y, int) and x == y:
         return
     record_none(int_assert_eq, x, y)
+
 
 # It is not implemented in this notebook, but what if you wanted to
 # immediately check this assertion *while tracing* (instead of waiting
@@ -475,7 +523,6 @@ def assert_int_eq(x: SymInt, y: SymInt):
 # but it is a good exercise to try.
 
 
-
 # We our now ready to implement pointwise multiplication.  In this
 # notebook, we have chosen to faithfully replicate *broadcasting*
 # semantics, which means that adding two tensors with two different
@@ -488,8 +535,10 @@ def assert_int_eq(x: SymInt, y: SymInt):
 # possible choice is to only report a SymInt as one if it is
 # *specialized* to be one (e.g., it is literally a one integer.)
 
+
 def definitely_one(x: SymInt) -> bool:
     return isinstance(x, int) and x == 1
+
 
 # This reasoning is not complete.  Suppose x has size (s0,) and y has
 # size (s1,), and we have:
@@ -541,9 +590,12 @@ def definitely_one(x: SymInt) -> bool:
 # it will reject it (even if at runtime it happened to be one and
 # therefore the broacasting woudl have succeeded).
 
+
 def assert_shape_broadcast(lhs, rhs):
     r = []
-    for x, y in itertools.zip_longest(reversed(lhs.shape), reversed(rhs.shape), fillvalue=1):
+    for x, y in itertools.zip_longest(
+        reversed(lhs.shape), reversed(rhs.shape), fillvalue=1
+    ):
         if definitely_one(x):
             r.append(y)
         elif definitely_one(y):
@@ -553,9 +605,11 @@ def assert_shape_broadcast(lhs, rhs):
             r.append(x)  # pick one arbitrarily
     return tuple(reversed(r))
 
+
 # Finally, we can implement multplication!
 
-def operator_mul(self : Variable, rhs: Variable) -> Variable:
+
+def operator_mul(self: Variable, rhs: Variable) -> Variable:
     if isinstance(rhs, float) and rhs == 1.0:
         # peephole optimization
         return self
@@ -575,29 +629,32 @@ def operator_mul(self : Variable, rhs: Variable) -> Variable:
     # Define backprop.  This closes over self and rhs, which are
     # necessary to define the backwards rule.
     def propagate(dL_doutputs: List[Variable]):
-        dL_dr, = dL_doutputs
+        (dL_dr,) = dL_doutputs
 
-        dr_dself = rhs # partial derivative of r = self*rhs
-        dr_drhs = self # partial derivative of r = self*rhs
+        dr_dself = rhs  # partial derivative of r = self*rhs
+        dr_drhs = self  # partial derivative of r = self*rhs
 
         # chain rule propagation from outputs to inputs of multiply
         dL_dself = dL_dr * dr_dself
         dL_drhs = dL_dr * dr_drhs
         dL_dinputs = [dL_dself, dL_drhs]
         return dL_dinputs
+
     # Finally, we record the compute we did on the tape
     gradient_tape.append(TapeEntry(inputs=inputs, outputs=outputs, propagate=propagate))
     return r
 
+
 # The implementation of gradient computation works exactly the same
 # way it did in Simple Grad.
 
+
 def grad(L, desired_results: List[Variable]) -> List[Variable]:
     # this map holds dL/dX for all values X
-    dL_d : Dict[str, Variable] = {}
+    dL_d: Dict[str, Variable] = {}
     # It starts by initializing the 'seed' dL/dL, which is 1
     dL_d[L.name] = Variable.constant(torch.ones(()))
-    print(f'd{L.name} ------------------------')
+    print(f"d{L.name} ------------------------")
 
     # look up dL_dentries. If a variable is never used to compute the loss,
     # we consider its gradient None, see the note below about zeros for more information.
@@ -616,8 +673,8 @@ def grad(L, desired_results: List[Variable]) -> List[Variable]:
         dL_dinputs = entry.propagate(dL_doutputs)
 
         # Accululate the gradient produced for each input.
-        # Each use of a variable produces some gradient dL_dinput for that 
-        # use. The multivariate chain rule tells us it is safe to sum 
+        # Each use of a variable produces some gradient dL_dinput for that
+        # use. The multivariate chain rule tells us it is safe to sum
         # all the contributions together.
         for input, dL_dinput in zip(entry.inputs, dL_dinputs):
             if input not in dL_d:
@@ -625,49 +682,66 @@ def grad(L, desired_results: List[Variable]) -> List[Variable]:
             else:
                 dL_d[input] = dL_d[input] + dL_dinput
 
-    # print some information to understand the values of each intermediate 
+    # print some information to understand the values of each intermediate
     for name, value in dL_d.items():
-        print(f'd{L.name}_d{name}: {value.shape} = {value.name}')
-    print(f'------------------------')
+        print(f"d{L.name}_d{name}: {value.shape} = {value.name}")
+    print(f"------------------------")
 
     return gather_grad(desired.name for desired in desired_results)
+
 
 # Add, sum and expand look identical to their versions in Simple Grad.
 # One thing to note, however: expand takes sizes as input, and those
 # sizes can be symbolic!
 
-def operator_add(self : Variable, rhs: Variable) -> Variable:
+
+def operator_add(self: Variable, rhs: Variable) -> Variable:
     shape = assert_shape_broadcast(self, rhs)
     assert self.dtype == rhs.dtype  # no type promotion
     r = record_var(var_add, shape, self.dtype, self, rhs)
+
     def propagate(dL_doutputs: List[Variable]):
-        dL_dr, = dL_doutputs
+        (dL_dr,) = dL_doutputs
         dr_dself = 1.0
         dr_drhs = 1.0
         dL_dself = dL_dr * dr_dself
         dL_drhs = dL_dr * dr_drhs
         return [dL_dself, dL_drhs]
-    gradient_tape.append(TapeEntry(inputs=[self.name, rhs.name], outputs=[r.name], propagate=propagate))
+
+    gradient_tape.append(
+        TapeEntry(inputs=[self.name, rhs.name], outputs=[r.name], propagate=propagate)
+    )
     return r
 
-def operator_sum(self: Variable, name: Optional[str]) -> 'Variable':
+
+def operator_sum(self: Variable, name: Optional[str]) -> "Variable":
     r = record_var(var_sum, (), self.dtype, self, name=name)
+
     def propagate(dL_doutputs: List[Variable]):
-        dL_dr, = dL_doutputs
+        (dL_dr,) = dL_doutputs
         size = self.shape
         return [dL_dr.expand(size)]
-    gradient_tape.append(TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate))
+
+    gradient_tape.append(
+        TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate)
+    )
     return r
 
+
 # NB: -1 sizes was not implemented
-def operator_expand(self: Variable, sizes: List[SymInt]) -> 'Variable':
-    assert self.dim() == 0 # only works for scalars
+def operator_expand(self: Variable, sizes: List[SymInt]) -> "Variable":
+    assert self.dim() == 0  # only works for scalars
     r = record_var(var_expand, sizes, self.dtype, self, sizes)
+
     def propagate(dL_doutputs: List[Variable]):
-        dL_dr, = dL_doutputs
+        (dL_dr,) = dL_doutputs
         return [dL_dr.sum()]
-    gradient_tape.append(TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate))
+
+    gradient_tape.append(
+        TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate)
+    )
     return r
+
 
 # With these operators, we can reprise the simple add-multiply example
 # from the original Simple Grad, but this time first symbolically
@@ -675,14 +749,16 @@ def operator_expand(self: Variable, sizes: List[SymInt]) -> 'Variable':
 
 # +
 
+
 def simple(a, b):
     t = a + b
     return t * b
 
-reset() # reset any compute from other cells
+
+reset()  # reset any compute from other cells
 # We do no computation in this part, we're just tracing!
-a = Variable((4,), dtype=torch.float, name='a')
-b = Variable((4,), dtype=torch.float, name='b')
+a = Variable((4,), dtype=torch.float, name="a")
+b = Variable((4,), dtype=torch.float, name="b")
 loss = simple(a, b)
 da, db = grad(loss, [a, b])
 # Setting a and b to random tensors, run the interpreted graph
@@ -744,13 +820,15 @@ except Exception:
 # better, as it seems more logical (the variable depends on the symbolic
 # integer, not the other way around).
 
-def operator_nonzero(self: Variable) -> 'Variable':
+
+def operator_nonzero(self: Variable) -> "Variable":
     s = SymbolicIntNode()
     r = Variable((s, self.dim()), torch.long)
     n = Node(var_nonzero_impl, (self.name,), [s.name, r.name])
-    print(f'{n} : {r.shape}')
+    print(f"{n} : {r.shape}")
     CURRENT_GRAPH.nodes.append(n)
     return r
+
 
 # Nonzero isn't very interesting on its own, so I also included
 # implementations of advanced indexing which can make use of the
@@ -761,19 +839,29 @@ def operator_nonzero(self: Variable) -> 'Variable':
 # and then compute your loss only on those entries (because they're the
 # boxes that MaskRCNN actually selected for recognition!)
 
-def operator_index(self: Variable, index: Variable) -> 'Variable':
+
+def operator_index(self: Variable, index: Variable) -> "Variable":
     assert isinstance(index, Variable)  # no slices support
     assert index.dtype == torch.long  # integer indexing only
     assert index.dim() == 1  # 1D index only
-    r = record_var(var_index, (index.shape[0],) + self.shape[1:], self.dtype, self, index)
+    r = record_var(
+        var_index, (index.shape[0],) + self.shape[1:], self.dtype, self, index
+    )
+
     def propagate(dL_doutputs: List[Variable]):
-        dL_dr, = dL_doutputs
+        (dL_dr,) = dL_doutputs
         return [self.index_backward(index, dL_dr)]
+
     # NB: index not recorded on tape as it is nondifferentiable
-    gradient_tape.append(TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate))
+    gradient_tape.append(
+        TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate)
+    )
     return r
 
-def operator_index_backward(self: Variable, index: Variable, grad_output: Variable) -> 'Variable':
+
+def operator_index_backward(
+    self: Variable, index: Variable, grad_output: Variable
+) -> "Variable":
     assert isinstance(index, Variable)
     assert index.dtype == torch.long  # integer indexing only
     assert index.dim() == 1  # 1D index only
@@ -782,14 +870,19 @@ def operator_index_backward(self: Variable, index: Variable, grad_output: Variab
     for i in range(1, len(self.shape)):
         assert_int_eq(self.shape[i], grad_output.shape[i])
     r = record_var(var_index_backward, self.shape, self.dtype, self, index, grad_output)
+
     def propagate(dL_doutputs: List[Variable]):
-        dL_dr, = dL_doutputs
+        (dL_dr,) = dL_doutputs
         return [dL_dr[index]]
+
     # NB: self and index not recorded as they are nondifferentiable
-    gradient_tape.append(TapeEntry(inputs=[grad_output.name], outputs=[r.name], propagate=propagate))
+    gradient_tape.append(
+        TapeEntry(inputs=[grad_output.name], outputs=[r.name], propagate=propagate)
+    )
     return r
 
-def operator_squeeze(self: Variable, dim: int) -> 'Variable':
+
+def operator_squeeze(self: Variable, dim: int) -> "Variable":
     # Technically, squeeze is supposed to noop if the dimension isn't
     # size 1.  But if the shape in question is dynamic we don't
     # know if it is one or not.  For now, we just assert that it has to
@@ -797,7 +890,14 @@ def operator_squeeze(self: Variable, dim: int) -> 'Variable':
     # to go between behavior
     if not definitely_one(self.shape[dim]):
         raise RuntimeError("cannot squeeze on dynamic dimension")
-    r = record_var(var_squeeze, self.shape[0:dim] + self.shape[dim+1:], self.dtype, self, dim=dim)
+    r = record_var(
+        var_squeeze,
+        self.shape[0:dim] + self.shape[dim + 1 :],
+        self.dtype,
+        self,
+        dim=dim,
+    )
+
     def propagate(dL_doutputs: List[Variable]):
         (dL_dr,) = dL_outputs
         # NB: This is only the backwards if a squeeze actually occurs
@@ -808,9 +908,17 @@ def operator_squeeze(self: Variable, dim: int) -> 'Variable':
     )
     return r
 
+
 def operator_unsqueeze():
     assert_int_eq(self.shape[dim], 1)
-    r = record_var(var_unsqueeze, self.shape[0:dim] + (1,) + self.shape[dim:], self.dtype, self, dim=dim)
+    r = record_var(
+        var_unsqueeze,
+        self.shape[0:dim] + (1,) + self.shape[dim:],
+        self.dtype,
+        self,
+        dim=dim,
+    )
+
     def propagate(dL_doutputs: List[Variable]):
         (dL_dr,) = dL_outputs
         return [dL_dr.squeeze(dim)]
@@ -827,8 +935,8 @@ reset()
 a = Variable((2, 3), dtype=torch.float)
 i = Variable((4,), dtype=torch.long)
 loss = a[i].sum()
-da, = grad(loss, [a])
-interp_graph({a: torch.randn(2, 3), b: torch.tensor([0,0,0,1])}, da=da)
+(da,) = grad(loss, [a])
+interp_graph({a: torch.randn(2, 3), b: torch.tensor([0, 0, 0, 1])}, da=da)
 
 
 # Now, let's do a nontrivial symbolic case, where we index based on the
@@ -837,8 +945,8 @@ interp_graph({a: torch.randn(2, 3), b: torch.tensor([0,0,0,1])}, da=da)
 reset()
 a = Variable((6,), dtype=torch.float)
 i = a.nonzero().squeeze(1)
-loss = a[i].sum(name='L0')
-da, = grad(loss, [a])
+loss = a[i].sum(name="L0")
+(da,) = grad(loss, [a])
 interp_graph({a: torch.clamp(torch.randn(6), min=0)}, da=da)
 
 # I didn't finish everything that I wanted to in this prototype.  Here
