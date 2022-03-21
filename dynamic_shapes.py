@@ -1,28 +1,41 @@
 # -*- coding: utf-8 -*-
 
-from typing import List, NamedTuple, Callable, Dict, Optional, Union, Any
+from typing import List, NamedTuple, Callable, Dict, Optional, Union, Any, Tuple
 import torch
 from dataclasses import dataclass, field
 import functools
 import itertools
 from enum import Enum
+import traceback
 
-# This notebook implements dynamic shapes on top of [Simple
+torch.manual_seed(0)
+
+# This notebook implements rank specialized dynamic shapes on [Simple
 # Autograd](https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing)
 # The goal is to have an easy to hack on prototype of dynamic shapes
 # that you can use to explore different parts of the design space for
 # dynamic shapes.
-
+#
 # Most of the simplest graph capture mechanisms require shape
 # specialization, because they simply proceed by running an actual
 # iteration of the computation with real inputs, and simply recording
 # everything that occurred during the process.  This causes problems,
 # however, when shapes vary across different runs (e.g., you have a
-# dynamically sized input corresponding to, e.g., a string).  So
-# logically, you'd like some way to record "hey, this shape isn't 1024,
-# it can vary, don't make assumptions based on it happening to be 1024
-# this time.)
+# dynamically sized input or you use data-dependent operators like
+# nonzero/unique).  So logically, you'd like some way to record "hey,
+# this shape isn't 1024, it can vary, don't make assumptions based on it
+# happening to be 1024 this time.)
 
+# To get started, we define some utility functions the autograd
+# implementation.  FreshSupply lets us generate fresh names for
+# variables and symbolic integers in our program (for clarity,
+# we give them separate prefixes: v for variable, i for integer).
+# `gradient_tape` contains the global autograd tape for our
+# program; for more details, read the exposition in [Simple
+# Autograd](https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing)
+
+
+# +
 @dataclass
 class FreshSupply:
     prefix: str
@@ -35,26 +48,71 @@ class FreshSupply:
 fresh_var = FreshSupply('v')
 fresh_int = FreshSupply('i')
 
+class TapeEntry(NamedTuple):
+    # names of the inputs to the original computation
+    inputs : List[str]
+    # names of the outputs of the original computation
+    outputs: List[str]
+    # apply chain rule
+    propagate: 'Callable[List[Variable], List[Variable]]'
+
+gradient_tape : List[TapeEntry] = []
+
+def reset():
+  gradient_tape.clear()
+  fresh_var.fresh = 0
+  fresh_int.fresh = 0
+  CURRENT_GRAPH.nodes.clear()
+# -
+
+# The raison d'etre of dynamic shapes is for graph capture, and so to
+# start we will define a little IR representing sequences of operations
+# that we will be recording.  To avoid string confusion, we'll use
+# a little wrapper class Op to represent each operation; we'll give
+# meaning to these objects later by defining interpretation rules for
+# them.
+
+# +
+
 @dataclass(frozen=True)
 class Op:
     name: str
     def __str__(self):
         return self.name
 
-# this assert should be derivable from the given preconditions in the
-# program; it is inappropriate to use for "external" knowledge that is
-# not derivable
+# In this example, we only have asserts over integers, but you could
+# imagine other integer operations, e.g., addition, for handling
+# operators like torch.cat
 int_assert_eq = Op("int_assert_eq")
 var_constant = Op("var_constant")
 var_add = Op("var_add")
 var_mul = Op("var_mul")
 var_sum = Op("var_sum")
 var_expand = Op("var_expand")
+# Unlike nonzero, this returns both the number of nonzero elements, as
+# well as the return tensor
 var_nonzero_impl = Op("var_nonzero_impl")
 var_index = Op("var_index")  # aka x[i]
 var_index_backward = Op("var_index_backward")
 var_squeeze = Op("squeeze")
 var_unsqueeze = Op("unsqueeze")
+
+# -
+
+# Let's write a little interpreter for these these operations.  Their
+# implementations will proceed as you might expect.  Since there are a
+# lot of operators, we'll put all of the functions for handling these
+# operations in an INTERP_RULES dictionary.  The interpreter ops
+# distinguish between args and kwargs; args are dynamic data that is
+# allowed to depend on other operations in our IR, whereas kwargs
+# is static data which never depends on other computation.
+#
+# Note that operations on integers are also represented in the graph!
+# In some graph representations, integers are represented as scalar
+# tensors, but for clarity in this presentation they are represented by
+# a separate type.
+
+# +
 
 def register(d, k):
     def inner(f):
@@ -78,7 +136,8 @@ def interp_var_nonzero_impl(x: torch.Tensor):
 INTERP_RULES[var_index] = lambda t, i: t[i]
 # NB: this is inefficient: t's data doesn't to be retained to allocate
 # the zeros, only the dtype (actually technically inferrable from g) and size
-INTERP_RULES[var_index_backward] = lambda t, i, g: torch.zeros_like(t).index_put((i,), g, accumulate=True)
+INTERP_RULES[var_index_backward] = \
+        lambda t, i, g: torch.zeros_like(t).index_put((i,), g, accumulate=True)
 INTERP_RULES[var_constant] = lambda *, val: val
 INTERP_RULES[var_add] = lambda x, y: x + y
 INTERP_RULES[var_mul] = lambda x, y: x * y
@@ -86,13 +145,21 @@ INTERP_RULES[var_sum] = lambda x: x.sum()
 INTERP_RULES[var_expand] = lambda x, sizes: x.expand(sizes)
 INTERP_RULES[var_squeeze] = lambda x, *, dim: x.squeeze(dim)
 INTERP_RULES[var_unsqueeze] = lambda x, *, dim: x.unsqueeze(dim)
+# -
 
-# There's a little bit of choice in the IR representation.  I chose to
-# allow for complicated atoms to make the IR easier to read (no
-# intermediate size allocations) at the cost of more complicated use of
-# the IR.  This isn't a big deal for Z3 elaboration because we are
-# fixed rank anyway.
+# Let's actually define IR nodes that make use of these operations.
+# In many IRs, you only allow variables as arguments (so called
+# "administrative normal form"); but in this treatment, I chose to also
+# allow tuples in atoms to make the IR easier to read (as we can just
+# directly specify shapes as arguments, rather than having to first
+# allocate a tuple and then pass it the function).  There is no
+# need for first class tuples because we are dealing with *rank
+# specialized* dynamic shapes, so the size of tuples is always known
+# ahead of time.  Similarly, if an integer argument in a shape is
+# known statically ahead of time, we'll let you just inline it into
+# the argument site.  We will call these structures atoms.
 
+# +
 Atom = Union[str, int, List[Union[str, int]]]
 
 def str_atom(a: Atom) -> str:
@@ -102,6 +169,12 @@ def str_atom(a: Atom) -> str:
         return str(a)
     else:
         return f"({', '.join(str_atom(b) for b in a)})"
+
+# -
+
+# Our node looks fairly similar to an FX node: given some list of input
+# atoms and a dictionary of arbitrary extra (static) parameters, run
+# an operator on it and bind the results to outputs.
 
 @dataclass
 class Node:
@@ -118,18 +191,17 @@ class Node:
         params_str += ', '.join(f'{k}={v}' for k, v in self.params.items())
         return f"{outputs_str}{self.op}({inputs_str}{params_str})"
 
-# TODO: I kind of want to stratify int/var computations, but
-# it's pretty easy to pull out int comps only, and some ints
-# will depend on vars (torch.unique case)
-#
-# I'm also obligated to represent int computations as nodes
-# in the graph, as that is how compilers like XLA model it
-# (not as refinement type predicates)
+# A graph is simply a list of nodes.  In a real application we may also
+# need some provision for graph-level inputs/outputs, but they aren't
+# necessary for these example so they are omitted.
+
 @dataclass
 class Graph:
     nodes: List[Node] = field(default_factory=list)
 
-# We can write a little interpreter
+# Now, we can finish our interpreter on graphs.
+
+# +
 
 def tuplify(outs):
     if outs is None:
@@ -150,13 +222,24 @@ def interp_atom(atom: Atom, env: Dict[str, Any]):
 def interp_inputs(inputs: List[Atom], env: Dict[str, Any]):
     return tuple(interp_atom(i, env) for i in inputs)
 
-# mutates env
+# Mutates the environment, storing the results into env
 def interp_node(n: Node, env: Dict[str, Any]):
     args = tuple(interp_atom(i, env) for i in n.inputs)
-    outs = tuplify(INTERP_RULES[n.op](*args, **n.params))
+    try:
+        outs = tuplify(INTERP_RULES[n.op](*args, **n.params))
+    except Exception:
+        print(f"Failed during: {n}")
+        raise
     assert len(outs) == len(n.outputs)
     for k, v in zip(n.outputs, outs):
         env[k] = v
+
+# -
+
+# To put it all together, we have a final `interp_graph` function,
+# which takes in initial values for variables and then runs the
+# graph recorded at `CURRENT_GRAPH` to compute some output variables
+# (which it then prints.)
 
 def interp_graph(init: Dict[Union["Variable", "SymbolicIntNode"], Any], **outs):
     env = {k.name: v for k, v in init.items()}
@@ -165,20 +248,165 @@ def interp_graph(init: Dict[Union["Variable", "SymbolicIntNode"], Any], **outs):
     for k, v in outs.items():
         print(f"{k} = {env[v.name]}")
 
-# Let's work on symbolics
+# Phew, that's it for the IR representation.  Let's actually generate
+# some graphs!  We'll maintain a global current graph which we record
+# into.
 
-# When we only deal in concrete shapes, the meaning of a shape check is
-# simple: just test that the shapes are what you actually expect (this is
-# what we implemented in the interpreter above).  However, when you have
-# symbolic sizes, the meaning of shape checks is more murky.  For
-# example, supposing x is a Tensor whose shape is symbolic, what does
-# this program mean:
+CURRENT_GRAPH = Graph()
+
+# Like FX, XLA and LazyTensor, we will generate graphs by maintaining
+# symbolic "proxy" objects (Variable, SymbolicIntNode) which act
+# like normal tensors/integers but don't actually contain any data
+# and record the operations that occur on them.  Our symbolic integers
+# in this example have a very impoverished interface; in fact they
+# support no operations at all, they simply have a name corresponding
+# to their name in the graph.
+
+# +
+
+class SymbolicIntNode:
+    name: str
+    def __init__(self, name=None):
+        self.name = name or fresh_int()
+    def __repr__(self):
+        return self.name
+
+class Variable:
+    shape: List[Union["SymInt", int]]
+    name: str
+    dtype: torch.dtype
+
+    def __init__(self, shape, dtype: torch.dtype, *, name: str=None):
+        self.shape = shape
+        self.dtype = dtype
+        self.name = name or fresh_var()
+
+    def dim(self):
+        return len(self.shape)
+
+    # We need to start with some tensors whose values were not computed
+    # inside the autograd. This function constructs leaf nodes. 
+    @staticmethod
+    def constant(value: torch.Tensor, name: str=None):
+        return record_var(var_constant, tuple(value.shape), value.dtype, val=value)
+
+    def __repr__(self):
+        return f"{self.name}: {self.shape}"
+
+    # Most of the actual implementations of these operators will be
+    # given later.
+
+    def __mul__(self, rhs: 'Variable') -> 'Variable':
+        # defined later in the notebook
+        return operator_mul(self, rhs)
+
+    def __add__(self, rhs: 'Variable') -> 'Variable':
+        return operator_add(self, rhs)
+
+    def sum(self, name: Optional[str]=None) -> 'Variable':
+        return operator_sum(self, name)
+
+    def expand(self, sizes: List["SymInt"]) -> 'Variable':
+        return operator_expand(self, sizes)
+
+    def nonzero(self) -> 'Variable':
+        return operator_nonzero(self)
+
+    def squeeze(self, dim: int) -> 'Variable':
+        return operator_squeeze(self, dim)
+
+    def unsqueeze(self, dim: int) -> 'Variable':
+        return operator_unsqueeze(self, dim)
+
+    def zeros_like(self) -> 'Variable':
+        return zeros_like(self)
+
+    def __getitem__(self, index) -> 'Variable':
+        return operator_index(self, index)
+
+    def index_backward(self, index, grad_output) -> 'Variable':
+        return operator_index_backward(self, index, grad_output)
+
+# -
+
+# We allow integers to be specialized (indeed, in lazy tensor, most
+# integers in networks will be statically known), so you may be
+# dealing with a literal integer or a symbolic integer node.  SymInt
+# captures these two possibilities.
+
+SymInt = Union[SymbolicIntNode, int]
+
+# To record a graph node involving integers (e.g., `int_assert_eq`),
+# we simply take in the input Variables/SymInts, extract out their
+# names, and record an operator to the current graph for the operation
+# we tried to do.  Furthermore, if the operation returns a result
+# (e.g., an int or a tensor), we have to construct a new proxy object
+# representing the result.  We provide helper functions for doing this
+# with operations that return nothing, a single int, or a single
+# variable (note that the to return a new variable proxy, we must
+# provide a (possibly symbolic but definitely rank specialized) shape
+# and a (concrete) dtype of the result.  (dtypes are concrete because
+# we don't support symbolic dtype!  That is a much rarer thing to want
+# to do inside of a network.)
+
+# +
+
+def record_arg(a):
+    if isinstance(a, tuple):
+        return tuple(record_arg(b) for b in a)
+    elif isinstance(a, int):
+        return a
+    else:
+        assert isinstance(a, (Variable, SymbolicIntNode))
+        return a.name
+
+def record_none(op, *args, **kwargs):
+    n = Node(op, tuple(record_arg(a) for a in args), [], kwargs)
+    print(n)
+    CURRENT_GRAPH.nodes.append(n)
+
+def record_int(op, *args, **kwargs):
+    i = SymbolicIntNode()
+    n = Node(op, tuple(a.name for a in args), [i.name], kwargs)
+    print(n)
+    CURRENT_GRAPH.nodes.append(n)
+    return i
+
+def record_var(op, shape: Tuple[SymInt, ...], dtype: torch.dtype, *args, name=None, **kwargs):
+    r = Variable(shape, dtype, name=name)
+    n = Node(op, tuple(record_arg(a) for a in args), [r.name], kwargs)
+    print(f'{n} : {r.shape}')
+    CURRENT_GRAPH.nodes.append(n)
+    return r
+
+
+# -
+
+# We our now ready to define our first operation: `int_assert_eq`.
+# Although we peephole a few cases where this assertion is vacuously
+# true, in general we don't know if two symbolic integers are actually
+# equal or not, so we just record an assertion in the graph to be
+# verified later at runtime.
+
+def assert_int_eq(x: SymInt, y: SymInt):
+    # peephole optimization
+    if isinstance(x, SymbolicIntNode) and isinstance(y, SymbolicIntNode) and x.name == y.name:
+        return
+    if isinstance(x, int) and isinstance(y, int) and x == y:
+        return
+    record_none(int_assert_eq, x, y)
+
+# It is not implemented in this notebook, but what if you wanted to
+# immediately check this assertion *while tracing* (instead of waiting
+# for concrete inputs/sizes).  There is now an interesting choice you have
+# to make.  In particular, suppose x is a Tensor whose shape is
+# symbolic; what does this program mean?
 #
 # ```
 # assert x.shape[0] == 4
 # ```
 #
-# Is this a valid program or not?  Here are two possibilities:
+# Should you error during tracing or not?  There are two possibilities:
 #
 # 1. **The program is invalid.**  In this interpretation, the
 #    shape of x being symbolic is a claim that this program should
@@ -215,25 +443,17 @@ def interp_graph(init: Dict[Union["Variable", "SymbolicIntNode"], Any], **outs):
 #    we run them on.
 #
 # If you told me I could only support one case, I would pick case (1).
-# The reasons are two fold.  First, the motivating use case for symbolic
-# shapes is to aid compilers (like XLA and nvFuser) which want to avoid
-# uselessly respecializing graphs where their inputs are dynamic.  It
-# seems very reasonable to ask users to explicitly annotate when such
-# dynamism could occur.  Second, this type of symbolic variable is
-# necessary to support programs with data-dependent shapes.  Consider
-# torch.unique(), a function whose output size is dependent on the data
-# inside the function.  If we wish to write down the shape of this
-# function without reference to the data in the tensor (which is
-# typically what we want to do--we usually want to write the shapes of
-# our programs in a data oblivious way), all we can really say is that
-# there *exists* some (symbolic) size such that the tensor has that
-# size, but no, I can't tell you what it is.  If the user then passed
-# this result tensor into an operator that expects the size to actually
-# be four, we would expect this to be an error.  (Now, it's *possible*
-# that the user has some external knowledge that this unique() call will
-# in fact always produce tensors of exactly size four, but typically
-# this information would be provided out-of-band via an, e.g.,
-# `output_size` argument to the function in question.)
+# To see why, consider torch.nonzero(), a function whose output size is
+# dependent on the data inside the function.  If we wish to write down
+# the shape of this function without reference to the data in the tensor
+# (which is typically what we want to do--we usually want to write the
+# shapes of our programs in a data oblivious way), all we can really say
+# is that there *exists* some (symbolic) size such that the tensor has
+# that size, but no, I can't tell you what it is.  If the user then
+# passed this result tensor into an operator that expects the size to
+# actually be four, we would expect this to be an error.  (Now, it's
+# possible that there *accidentally* were four nonzero elements, but
+# I wouldn't bet on it!)
 #
 # Case (2) has some useful applications; however.  If you are given an
 # arbitrary model with no annotations, you can replace all of the input
@@ -243,80 +463,36 @@ def interp_graph(init: Dict[Union["Variable", "SymbolicIntNode"], Any], **outs):
 # middle of your model where you're not sure what the size should be,
 # you could stick a flexible size there and have the symbolic algebra
 # system tell you what the size has to be (LazyModule style).
-
-# TODO: for simplicity, no context (hypotheses) for input shapes is currently modeled,
-# but it should be.  Maybe we have assume/assert
-
-CURRENT_GRAPH = Graph()
-
-def record_arg(a):
-    if isinstance(a, tuple):
-        return tuple(record_arg(b) for b in a)
-    elif isinstance(a, int):
-        return a
-    else:
-        assert isinstance(a, (Variable, SymbolicIntNode))
-        return a.name
-
-def record_var(op, shape, dtype, *args, name=None, **kwargs):
-    r = Variable(shape, dtype, name=name)
-    n = Node(op, tuple(record_arg(a) for a in args), [r.name], kwargs)
-    print(f'{n} : {r.shape}')
-    CURRENT_GRAPH.nodes.append(n)
-    return r
-
-def record_none(op, *args, **kwargs):
-    n = Node(op, tuple(record_arg(a) for a in args), [], kwargs)
-    print(n)
-    CURRENT_GRAPH.nodes.append(n)
-
-class SymbolicIntNode:
-    name: str
-    def __init__(self, name=None):
-        self.name = name or fresh_int()
-    def __repr__(self):
-        return self.name
-
-SymInt = Union[SymbolicIntNode, int]
-
-def record_int(op, *args, **kwargs):
-    i = SymbolicIntNode()
-    n = Node(op, tuple(a.name for a in args), [i.name], kwargs)
-    print(n)
-    CURRENT_GRAPH.nodes.append(n)
-    return i
-
-# if we're cool kids like FX we can use bytecode analysis to interpose
-# on asserts, but since we're not we just implement it manually
-def assert_int_eq(x: SymInt, y: SymInt):
-    # peephole optimization
-    if isinstance(x, SymbolicIntNode) and isinstance(y, SymbolicIntNode) and x.name == y.name:
-        return
-    if isinstance(x, int) and isinstance(y, int) and x == y:
-        return
-    # TODO: on the fly solve constraints to keep context small
-    record_none(int_assert_eq, x, y)
-
-# In full generality, what I'm supposed to do is run my symbolic algebra
-# system whenever I do an equality test on to integer nodes and
-# determine if the equality always holds, or if there are some symbolic
-# inputs for which it does not hold.  If things are trivially not equal
-# (e.g., rigid s asserted to be equal with 2), I want to report an
-# error immediately; but I do not actually want to actually shell out to
-# Z3 for these computations.
 #
-# To make matters worse, I want to do conditions on sizes in some
-# situations; in particular, for broadcasting, I want to test if
-# a size is 1.
+# In fact, case (1) and case (2) can coexist in the same model.  There
+# are a few ways to do it: you could distinguish between rigid/flexible
+# symbolic variables and have asserts work differently depending on the
+# variable in question/you could also introduce two different types
+# of asserts (one which says "this assert is derivable from the
+# shape preconditions of this model" and another which says "this assert
+# represents external knowledge that I have about the model, and you can
+# now use this for further reasoning.")  They're not implemented here,
+# but it is a good exercise to try.
+
+
+
+# We our now ready to implement pointwise multiplication.  In this
+# notebook, we have chosen to faithfully replicate *broadcasting*
+# semantics, which means that adding two tensors with two different
+# sizes at a dimension is OK if one of the sizes is one.
 #
-# For now, we assume that if you have a SymInt, it could be anything
-# (we NEVER learn anything when we do shape computations).
+# To do this, we need a way of taking a (possibly) symbolic integer
+# and checking (at trace time) if it is one.  For dynamic sizes,
+# there is no way to generically do this, because we haven't run
+# the program, we have no idea what the size will be!  So the simplest
+# possible choice is to only report a SymInt as one if it is
+# *specialized* to be one (e.g., it is literally a one integer.)
 
+def definitely_one(x: SymInt) -> bool:
+    return isinstance(x, int) and x == 1
 
-# One specialization poses a particular problem because we are required
-# to do some amount of reasoning to determine if broadcasting should
-# occur or not.  Suppose x has size (s0,) and y has size (s1,), and
-# we have:
+# This reasoning is not complete.  Suppose x has size (s0,) and y has
+# size (s1,), and we have:
 #
 # ```
 # assert x.shape[0] == 1
@@ -324,12 +500,11 @@ def assert_int_eq(x: SymInt, y: SymInt):
 # ```
 #
 # Does broadcasting occur on this addition?  A user might reasonably
-# expect that after this assertion, surely broadcasting should occur,
-# but to actually figure this out in the context of symbolic tracing,
-# we need to do the teeniest bit of symbolic reasoning.  Unification
-# suffices for this example: after the assertion, we now know that
-# x.shape[0] is "definitely one", and we can rely on this information
-# to perform a broadcast.
+# expect that after this assertion, surely broadcasting should occur.
+# But if we are relying on x.shape[0] to *literally* be one (as we
+# are in the implementation of `definitely_one` above), we won't figure
+# it out!  It's not too difficult to figure it out though: in
+# particular, if you implemented unification that would suffice.
 #
 # The trouble is, it's not well specified *how much* symbolic reasoning
 # we should be willing to do.  It seems that unification is necessary,
@@ -346,27 +521,27 @@ def assert_int_eq(x: SymInt, y: SymInt):
 # answer these questions would require an analysis of broadcasting usage
 # in the wild (or perhaps an analysis of networks with dynamic sizes.)
 #
-# There is an out, however.  If our symbolic reasoning is insufficient
-# for a user, they can always add an assert that a shape in question is
-# one to force broadcasting to occur in that case.  The crux of the
-# problem here is letting a user know that this is what they ought
-# to do; if two tensors don't broadcast with each other, we may just
-# require their sizes to be the same; but it might not be obvious
-# (without the help of a solver like Z3) that two symbolic sizes are
-# different.  If we lowered to an IR with non-broadcasting operations,
-# this will manifest at runtime where we'll say "Couldn't add tensors
-# with sizes 1 and N" (even though the surface language supported
-# broadcasting).  So you want to help the user out here with a better
-# error message, in that case.
+# There is sense in which unification is "good enough", however.  If our
+# symbolic reasoning is insufficient for a user, they can always add an
+# assert that a shape in question is one to force broadcasting to occur
+# in that case.  Then, the problem reduces to letting a user know
+# that this is what they ought to do; if two tensors don't broadcast
+# with each other, we may just require their sizes to be the same; but
+# it might not be obvious (without the help of a solver like Z3) that
+# two symbolic sizes are different.  If we lowered to an IR with
+# non-broadcasting operations, this will manifest at runtime where we'll
+# say "Couldn't add tensors with sizes 1 and N" (even though the surface
+# language supported broadcasting).  So you want to help the user out
+# here with a better error message, in that case.
 
-def definitely_one(x):
-    return isinstance(x, int) and x == 1
+# Anyway, now that we have `definitely_one`, we can implement an
+# assertion that two shapes are broadcastable (returning the
+# possible symbolic shape out the end).  This broadcasting is more
+# conservative than actual PyTorch, because if a shape is dynamic
+# it will reject it (even if at runtime it happened to be one and
+# therefore the broacasting woudl have succeeded).
 
 def assert_shape_broadcast(lhs, rhs):
-    # NB: if x *happens* to be one, but is not definitely one, we will
-    # still reject it (even if "happens" to be the case that we would
-    # broadcast here).  This is what it means for the trace to be
-    # one-specialized
     r = []
     for x, y in itertools.zip_longest(reversed(lhs.shape), reversed(rhs.shape), fillvalue=1):
         if definitely_one(x):
@@ -375,95 +550,30 @@ def assert_shape_broadcast(lhs, rhs):
             r.append(x)
         else:
             assert_int_eq(x, y)
-            r.append(x)  # pick one arbitrarily.  TODO: immediately unify
+            r.append(x)  # pick one arbitrarily
     return tuple(reversed(r))
 
-class Variable:
-    shape: List[Union[SymInt, int]]
-    name: str
-    dtype: torch.dtype
-
-    def __init__(self, shape, dtype: torch.dtype, *, name: str=None):
-        self.shape = shape
-        self.dtype = dtype
-        self.name = name or fresh_var()
-
-    def dim(self):
-        return len(self.shape)
-
-    # We need to start with some tensors whose values were not computed
-    # inside the autograd. This function constructs leaf nodes. 
-    @staticmethod
-    def constant(value: torch.Tensor, name: str=None):
-        return record_var(var_constant, tuple(value.shape), value.dtype, val=value)
-
-    def __repr__(self):
-        return f"{self.name}: {self.shape}"
-
-    # This performs a pointwise multiplication of a Variable, tracking gradients
-    def __mul__(self, rhs: 'Variable') -> 'Variable':
-        # defined later in the notebook
-        return operator_mul(self, rhs)
-
-    def __add__(self, rhs: 'Variable') -> 'Variable':
-        return operator_add(self, rhs)
-
-    def sum(self, name: Optional[str]=None) -> 'Variable':
-        return operator_sum(self, name)
-
-    def expand(self, sizes: List[SymInt]) -> 'Variable':
-        return operator_expand(self, sizes)
-
-    def nonzero(self) -> 'Variable':
-        return operator_nonzero(self)
-
-    def squeeze(self, dim: int) -> 'Variable':
-        return operator_squeeze(self, dim)
-
-    def unsqueeze(self, dim: int) -> 'Variable':
-        return operator_unsqueeze(self, dim)
-
-    def zeros_like(self) -> 'Variable':
-        return zeros_like(self)
-
-    def __getitem__(self, index) -> 'Variable':
-        return operator_index(self, index)
-
-    def index_backward(self, index, grad_output) -> 'Variable':
-        return operator_index_backward(self, index, grad_output)
-
-class TapeEntry(NamedTuple):
-    # names of the inputs to the original computation
-    inputs : List[str]
-    # names of the outputs of the original computation
-    outputs: List[str]
-    # apply chain rule
-    propagate: 'Callable[List[Variable], List[Variable]]'
-
-gradient_tape : List[TapeEntry] = []
-
-def reset():
-  gradient_tape.clear()
-  fresh_var.fresh = 0
-  fresh_int.fresh = 0
-  CURRENT_GRAPH.nodes.clear()
+# Finally, we can implement multplication!
 
 def operator_mul(self : Variable, rhs: Variable) -> Variable:
     if isinstance(rhs, float) and rhs == 1.0:
         # peephole optimization
         return self
 
-    # define forward
+    # Broadcast the two shapes together, getting the result shape
     shape = assert_shape_broadcast(self, rhs)
-    # no type promotion
+    # We didn't implement type promotion, so just assert that the
+    # inputs are the same dtype.
     assert self.dtype == rhs.dtype
+    # Record the operation into the graph
     r = record_var(var_mul, shape, self.dtype, self, rhs)
 
-    # record what the inputs and outputs of the op were
+    # Record what the inputs and outputs of the op were
     inputs = [self.name, rhs.name]
     outputs = [r.name]
 
-    # define backprop
+    # Define backprop.  This closes over self and rhs, which are
+    # necessary to define the backwards rule.
     def propagate(dL_doutputs: List[Variable]):
         dL_dr, = dL_doutputs
 
@@ -475,9 +585,12 @@ def operator_mul(self : Variable, rhs: Variable) -> Variable:
         dL_drhs = dL_dr * dr_drhs
         dL_dinputs = [dL_dself, dL_drhs]
         return dL_dinputs
-    # finally, we record the compute we did on the tape
+    # Finally, we record the compute we did on the tape
     gradient_tape.append(TapeEntry(inputs=inputs, outputs=outputs, propagate=propagate))
     return r
+
+# The implementation of gradient computation works exactly the same
+# way it did in Simple Grad.
 
 def grad(L, desired_results: List[Variable]) -> List[Variable]:
     # this map holds dL/dX for all values X
@@ -519,9 +632,11 @@ def grad(L, desired_results: List[Variable]) -> List[Variable]:
 
     return gather_grad(desired.name for desired in desired_results)
 
+# Add, sum and expand look identical to their versions in Simple Grad.
+# One thing to note, however: expand takes sizes as input, and those
+# sizes can be symbolic!
+
 def operator_add(self : Variable, rhs: Variable) -> Variable:
-    # Add follows a similar pattern to Mul, but it doesn't end up
-    # capturing any variables.
     shape = assert_shape_broadcast(self, rhs)
     assert self.dtype == rhs.dtype  # no type promotion
     r = record_var(var_add, shape, self.dtype, self, rhs)
@@ -535,10 +650,6 @@ def operator_add(self : Variable, rhs: Variable) -> Variable:
     gradient_tape.append(TapeEntry(inputs=[self.name, rhs.name], outputs=[r.name], propagate=propagate))
     return r
 
-# sum is used to turn our matrices into a single scalar to get a loss.
-# expand is the backward of sum, so it is added to make sure our Variable
-# is closed under differentiation. Both have rules similar to mul above.
-
 def operator_sum(self: Variable, name: Optional[str]) -> 'Variable':
     r = record_var(var_sum, (), self.dtype, self, name=name)
     def propagate(dL_doutputs: List[Variable]):
@@ -548,7 +659,7 @@ def operator_sum(self: Variable, name: Optional[str]) -> 'Variable':
     gradient_tape.append(TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate))
     return r
 
-
+# NB: -1 sizes was not implemented
 def operator_expand(self: Variable, sizes: List[SymInt]) -> 'Variable':
     assert self.dim() == 0 # only works for scalars
     r = record_var(var_expand, sizes, self.dtype, self, sizes)
@@ -558,6 +669,81 @@ def operator_expand(self: Variable, sizes: List[SymInt]) -> 'Variable':
     gradient_tape.append(TapeEntry(inputs=[self.name], outputs=[r.name], propagate=propagate))
     return r
 
+# With these operators, we can reprise the simple add-multiply example
+# from the original Simple Grad, but this time first symbolically
+# tracing the graph, and then executing it after the fact.
+
+# +
+
+def simple(a, b):
+    t = a + b
+    return t * b
+
+reset() # reset any compute from other cells
+# We do no computation in this part, we're just tracing!
+a = Variable((4,), dtype=torch.float, name='a')
+b = Variable((4,), dtype=torch.float, name='b')
+loss = simple(a, b)
+da, db = grad(loss, [a, b])
+# Setting a and b to random tensors, run the interpreted graph
+# and print out the result of da and db.
+va = torch.randn(4)
+vb = torch.randn(4)
+interp_graph({a: va, b: vb}, da=da, db=db)
+
+# -
+
+# In the above example, we still had variables with completely concrete
+# sizes.  We can also replace all of the input sizes with dynamic sizes,
+# and get a symbolic trace.  Note that in this example we gave a and
+# b distinct symbolic sizes, but actually the network requires them to
+# be the same and you can see the generated asserts.
+
+reset()
+s1 = SymbolicIntNode(name="s1")
+s2 = SymbolicIntNode(name="s2")
+a = Variable((s1,), dtype=torch.float)
+b = Variable((s2,), dtype=torch.float)
+loss = simple(a, b).sum()
+da, db = grad(loss, [a, b])  # expand can take symbolic sizes as argument
+interp_graph({s1: 4, s2: 4, a: va, b: vb}, da=da, db=db)
+
+# In fact, with our simple interpreter, we will fail the assert EVEN if
+# the original source program would have worked by broadcasting a
+# one-sized dimension.  This might be undesirable, but there are some
+# other ways to solve the problem:
+#
+#   - Arguably, the symbolic integer assignments here are wrong:
+#     for the internal addition/multiplication to be non-broadcasting,
+#     the sizes of the two inputs have to be the same.  So we could
+#     require the user to give a more precise set of preconditions.
+#
+#   - Alternately, if we are operating as a lazy tensor, the
+#     preconditions just say when we need to invalidate an old trace
+#     (and build a new trace with the assumption that it is
+#     broadcasting).
+
+try:
+    interp_graph({s1: 1, s2: 4, a: va, b: vb}, da=da, db=db)
+except Exception:
+    traceback.print_exc()
+
+# One of the motivating operators for dynamic shapes is nonzero (which
+# is used in MaskRCNN, among other models).  It's trace implementation
+# embodies the standard technique for dealing with unknown output sizes:
+# allocate a fresh SymbolicIntNode and put *that* in the size of the
+# returned tensor!
+#
+# There is a slight twist: inside the graph, it returns both a symbolic
+# int (the number of nonzero elements) as well as the actual result
+# tensor (containing the indices of the nonzero elements).  This is
+# necessary to ensure that the symbolic int is in scope for later
+# operations!  An alternative way to model this that was taken by XLA is
+# to return simply the tensor, and then represent the symbolic int as a
+# "get size" operation in the graph.  However, I like this orientation
+# better, as it seems more logical (the variable depends on the symbolic
+# integer, not the other way around).
+
 def operator_nonzero(self: Variable) -> 'Variable':
     s = SymbolicIntNode()
     r = Variable((s, self.dim()), torch.long)
@@ -565,6 +751,15 @@ def operator_nonzero(self: Variable) -> 'Variable':
     print(f'{n} : {r.shape}')
     CURRENT_GRAPH.nodes.append(n)
     return r
+
+# Nonzero isn't very interesting on its own, so I also included
+# implementations of advanced indexing which can make use of the
+# LongTensor returned by nonzero (as well as a squeeze, as you need to
+# chop off the last dimension returned by nonzero to get the output
+# compatible with indexing).  In MaskRCNN, the general idea of the code
+# is that you get the nonzero indexes, index them out of the tensor,
+# and then compute your loss only on those entries (because they're the
+# boxes that MaskRCNN actually selected for recognition!)
 
 def operator_index(self: Variable, index: Variable) -> 'Variable':
     assert isinstance(index, Variable)  # no slices support
@@ -600,7 +795,8 @@ def operator_squeeze(self: Variable, dim: int) -> 'Variable':
     # know if it is one or not.  For now, we just assert that it has to
     # be size 1 and reduce, but technically we should use definitely_one
     # to go between behavior
-    assert_int_eq(self.shape[dim], 1)
+    if not definitely_one(self.shape[dim]):
+        raise RuntimeError("cannot squeeze on dynamic dimension")
     r = record_var(var_squeeze, self.shape[0:dim] + self.shape[dim+1:], self.dtype, self, dim=dim)
     def propagate(dL_doutputs: List[Variable]):
         (dL_dr,) = dL_outputs
@@ -624,37 +820,9 @@ def operator_unsqueeze():
     )
     return r
 
-def simple(a, b):
-    t = a + b
-    return t * b
 
-# Let's first do the gradient computation with constants
+# As a warmup, let's show that indexing works.
 
-torch.manual_seed(0)
-
-reset() # reset any compute from other cells
-a = Variable((4,), dtype=torch.float, name='a')
-b = Variable((4,), dtype=torch.float, name='b')
-loss = simple(a, b)
-da, db = grad(loss, [a, b])
-interp_graph({a: torch.randn(4), b: torch.randn(4)}, da=da, db=db)
-
-# Now let's do it again but symbolic
-
-print("===========")
-reset()
-s1 = SymbolicIntNode(name="s1")
-s2 = SymbolicIntNode(name="s2")
-s3 = SymbolicIntNode(name="s3")
-a = Variable((s1, s2), dtype=torch.float)
-b = Variable((s1, s3), dtype=torch.float)
-loss = simple(a, b).sum()
-da, db = grad(loss, [a, b])  # expand can take symbolic sizes as argument
-interp_graph({s1: 4, s2: 3, s3: 3, a: torch.randn(4,3), b: torch.randn(4,3)}, da=da, db=db)
-
-
-# Let's show that indexing works
-print("===========")
 reset()
 a = Variable((2, 3), dtype=torch.float)
 i = Variable((4,), dtype=torch.long)
@@ -663,12 +831,37 @@ da, = grad(loss, [a])
 interp_graph({a: torch.randn(2, 3), b: torch.tensor([0,0,0,1])}, da=da)
 
 
-# Let's now do a nontrivial symbolic case, where we index based on the
+# Now, let's do a nontrivial symbolic case, where we index based on the
 # result of nonzero
-print("===========")
+
 reset()
 a = Variable((6,), dtype=torch.float)
 i = a.nonzero().squeeze(1)
 loss = a[i].sum(name='L0')
 da, = grad(loss, [a])
 interp_graph({a: torch.clamp(torch.randn(6), min=0)}, da=da)
+
+# I didn't finish everything that I wanted to in this prototype.  Here
+# are more things that could be done:
+#
+#   - We have a relatively complicated design for non-refcounted SymInt
+#     in C++.  This design could be implemented here to get a better
+#     understanding of how explicit reference counting affects the
+#     user experience.
+#
+#   - Right now, the symbolic traces represent add/mul as their
+#     broadcasting versions.  It is easy to tweak it using
+#     `definitely_one` to explicitly represent the broadcasting
+#     using an expand first.
+#
+#   - XLA's dynamic shape support also tracks upper bounds for all
+#     symbolic sizes.  Incorporate support for that here.
+#
+#   - Incorporate some level of symbolic reasoning, improving the
+#     precision of `definitely_one` or letting us check the validity
+#     asserts while tracing (and not only just at runtime).  A
+#     good start would be unification, but backending to Z3 would also
+#     be interesting.
+#
+#   - Add some operators with nontrivial input/output shape
+#     relationships (e.g., addition, division, etc.)
