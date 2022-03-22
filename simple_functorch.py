@@ -201,6 +201,15 @@ class Torch(Dispatcher):
     def ones(self, size):
         return label(torch.ones(size))
 
+    def custom_vjp(self, fwd_fn, bwd_fn, *args):
+        # The backend layer for custom_vjp just calls fwd_fn.
+        # Why doesn't it create an autograd.Function? We're assuming the backend
+        # layer doesn't need to handle Autograd.
+        a, b = fwd_fn(self, *args)
+        result = label(a), label(b)
+        return result
+
+
     def lift(self, input, d):
         assert d is self
         return input
@@ -211,6 +220,21 @@ class Torch(Dispatcher):
 # For example, the Logger dispatcher simply prints out what operation
 # was called on it, and then forwards on the operation to the inner
 # dispatcher.
+
+
+def custom_vjp_str(r, fwd_fn, bwd_fn, args):
+    arg_names = ', '.join([a.t_name for a in args])
+    r_is_tensor = isinstance(r, torch.Tensor)
+    if r_is_tensor:
+        result_names = r.t_name
+    else:
+        result_names = [r.t_name for r in r]
+        if len(result_names) == 1:
+            result_names = f'{result_names[0]},'
+        else:
+            result_names = ', '.join(result_names)
+
+    print(f"{result_names} = custom_vjp({fwd_fn.__name__}, {bwd_fn.__name__}, {arg_names})")
 
 
 class Logger(Dispatcher):
@@ -264,6 +288,11 @@ class Logger(Dispatcher):
         print(
             f"{self.name} {r.t_name}: {self.size(r)} = {input.t_name}.expand({sizes})"
         )
+        return r
+
+    def custom_vjp(self, fwd_fn, bwd_fn, *args):
+        r = self.inner.custom_vjp(fwd_fn, bwd_fn, *args)
+        print(custom_vjp_str(r, fwd_fn, bwd_fn, args))
         return r
 
     def lift(self, input, d):
@@ -459,6 +488,26 @@ class Autograd(Dispatcher):
     def ones(self, size):
         return self.inner.ones(size)
 
+    def custom_vjp(self, fwd_fn, bwd_fn, *args):
+        # To support Autograd(Autograd(Torch()), custom_vjp MUST call custom_vjp
+        # on the inner dispatcher. If it instead called fwd_fn(*args), then
+        # the inner Autograd dispatcher would not use bwd_fn in its backward pass.
+        r, saved = self.inner.custom_vjp(fwd_fn, bwd_fn, *args)
+        print(custom_vjp_str(r, fwd_fn, bwd_fn, args))
+
+        # To preserve custom backward semantics, we create a lambda that calls
+        # bwd_fn. This lambda is then saved on the gradient tape.
+        def propagate(dL_doutputs: List[Tensor]):
+            return bwd_fn(self, dL_doutputs, saved)
+
+        self.gradient_tape.append(
+            TapeEntry(
+                inputs=[arg.t_name for arg in args], outputs=[r.t_name], propagate=propagate
+            )
+        )
+        return r, saved
+
+
     def lift(self, input, d):
         if d is self:
             return input
@@ -563,6 +612,7 @@ def run_gradients(d2, d1):
 da, db = run_gradients(d, d)
 print("da", da)
 print("db", db)
+
 # -
 
 # Our second option is to follow functorch's implementation strategy, which
@@ -592,6 +642,7 @@ d2 = Autograd(d1, name="Autograd2", create_graph=False)
 da, db = run_gradients(d2, d1)
 print("da", da)
 print("db", db)
+
 # -
 
 # Under what situations might it be profitable to keep the two tapes separate?
@@ -664,6 +715,28 @@ class Batched(Dispatcher):
         assert self.inner.size(input)[0] == self.length
         return self.inner.unsqueeze(input, dim + 1)
 
+    def custom_vjp(self, fwd_fn, bwd_fn, *args):
+        def batchify(fn):
+            def new_fn(d, *args):
+                new_d = Batched(d, length = self.length, name = 'GeneratedBatched')
+                result = fn(new_d, *args)
+                return result
+            return new_fn
+
+        # If we have Batched(Autograd(Torch()), then we would like the inner
+        # dispatcher to receive a call to custom_vjp so that it preserves the
+        # backward semantics. However, since this is the Batched dispatcher,
+        # we want the innermost Torch dispatcher to run a batched version of fwd_fn
+        # function! The way we get this to work is to create a new fwd_fn, that,
+        # when executed, executes a batched version of fwd_fn.
+        #
+        # Same thing for the bwd_fn.
+        # NB: currently simple_functorch assumes that all Tensors are batched at
+        # dimension 0. I'm not sure how this logic would look like without
+        # this assumption (in functorch tensors may not be batched).
+        r, saved = self.inner.custom_vjp(batchify(fwd_fn), batchify(bwd_fn), *args)
+        return r, saved
+
     # The lift operation takes a tensor associated with some inner
     # dispatcher, and "lifts" it so that it is interpreted neutrally
     # for the outer dispatcher.  For most dispatchers this is trivial,
@@ -709,6 +782,7 @@ print("va", va)
 print("vb", vb)
 print("dva", dva)
 print("dvb", dvb)
+
 # -
 
 # To see that we have done this correctly, we could run the corresponding JAX:
@@ -1064,3 +1138,119 @@ print("output", output.tensor)
 #
 # jitting gives you an xla_call_p, which STORES the jaxpr
 #   transforms look into the jaxpr and retrace it with the transform
+
+# -
+
+# Higher order operators in simple_functorch!
+#
+# Problem: users want to define functions with custom forward and backward
+# passes. These functions call PyTorch operations. When we vmap over such a
+# function, we would like for the backward pass to be preserved.
+#
+# Why is this difficult? In PyTorch today, vmap over an autograd.Function
+# effectively runs vmap on the forward pass of the autograd.Function.
+# Meanwhile, autograd records the transformed operations for backward, instead
+# of the custom backward pass we specified in the autograd.Function!
+#
+# Solution: We're going to introduce a `custom_vjp` primitive that accepts
+# functions and varargs Tensor arguments and demonstrate that it resolves
+# the problem.
+#
+# custom_vjp(fwd_fn, bwd_fn, *args) takes in two functions as arguments.
+
+# +
+
+# For our custom function, we want f(x) = x * x, but we install a custom
+# backwards pass that computes 32 * x (instead of 2 * x) so we can tell
+# if custom_vjp is working.
+
+d = Autograd(Torch())
+
+a = label(torch.rand(4))
+va = label(torch.rand(2, 4))
+
+def f_fwd(dispatcher, x):
+    # Our convention is that f_fwd returns (outputs, "saved")
+    return dispatcher.mul(x, x), x
+
+# Our convention is that f_bwd accepts (dispatcher, gradOutputs, "saved")
+def f_bwd(dispatcher, gradOutputs, x):
+    gO, = gradOutputs
+    # Should be gO * 2 * x, but we're gonna do gO * 32 * x to demonstrate things
+    return [dispatcher.mul(dispatcher.mul(gO, x), label(torch.tensor(32.), 'thirty_two'))]
+
+# -
+
+# Okay, now let's try it out!
+#
+# The implementaton of custom_vjp is:
+# - call custom_vjp on the inner dispatcher
+# - save f_bwd as a lambda onto the gradient tape
+# (See earlier in this colab for more details)
+
+# +
+
+# A single layer of autograd
+def run_grad(d):
+    # Here's how to invoke custom_vjp.
+    r, _ = d.custom_vjp(f_fwd, f_bwd, a)
+    L3 = d.sum(r, name="L3")
+    dL3_a, = d.grad(L3, [a])
+
+    # Check that the gradients are indeed 32 * a
+    assert torch.allclose(dL3_a, 32 * a)
+
+run_grad(d)
+
+# Multiple layers of autograd
+def run_gradgrad(d2, d1):
+    r, _ = d2.custom_vjp(f_fwd, f_bwd, a)
+    L4 = d2.sum(r, name="L4")
+    dL4_a, = d2.grad(L4, [a])
+
+    # Evidence that d2 respected the custom_vjp's f_bwd
+    assert torch.allclose(dL4_a, 32 * a)
+
+    assert hasattr(dL4_a, 't_name')
+    dL4_a_sum = d1.sum(dL4_a, name='dL4_a_sum')
+    ddL4_a_a, = d1.grad(dL4_a_sum, [a])
+
+    # Evidence that d1 respected the custom_vjp's f_bwd
+    assert torch.allclose(ddL4_a_a, torch.ones_like(a) * 32)
+
+d1 = Autograd(Logger(Torch(), name="Torch"), name="Autograd1", create_graph=False)
+d2 = Autograd(d1, name="Autograd2", create_graph=False)
+run_gradgrad(d2, d1)
+
+# -
+
+# And now, let's try that again, with grad(lambda x: vmap(f)(x).sum()).
+# The goal of custom_vjp is to make it so that vmap(custom_vjp) still
+# preserves the backward semantics.
+
+# +
+
+def f_fwd(d, x):
+    return d.mul(x, x), x
+
+def f_bwd(d, gradOutputs, x):
+    gO, = gradOutputs
+    # Should be gO * 2 * x, but we're gonna do gO * 32 * x to prove a point
+    return [d.mul(d.mul(gO, x), label(torch.ones_like(x) * 32., 'thirty_two'))]
+
+
+d1 = Autograd(Torch(), name="Autograd1", create_graph=False)
+d2 = Batched(d1, length=2, name="Batched2")
+
+def run_gradvmap(d2: 'Batched', d1: 'Autograd'):
+    r, _ = d2.custom_vjp(f_fwd, f_bwd, va)
+    L99 = d1.sum(r, name="L99")
+    dL99_a, = d1.grad(L99, [va])
+
+    # As you can see, d1.grad still calls f_bwd.
+    # The way we got this to work is that Batched.custom_vjp
+    # calls custom_vjp on its inner dispatcher.
+    # Scroll up to the implementation of Batched for more details.
+    assert torch.allclose(dL99_a, 32 * va)
+
+run_gradvmap(d2, d1)
