@@ -17,7 +17,14 @@
 # Autograd](https://colab.research.google.com/drive/1VpeE6UvEPRz9HmsHh1KS0XxXjYu533EC?usp=sharing)
 # The goal is to have an easy to hack on prototype of dynamic shapes
 # that you can use to explore different parts of the design space for
-# dynamic shapes.
+# dynamic shapes.  The dynamic shapes model in this notebook is
+# appropriate for situations when you **truly do not know** the values
+# of dynamic shapes as you are tracing the model (this is the case for
+# backends like XLA, where we are not computing as we execute our
+# program and thus cannot know the shape of data-dependent operations
+# like torch.nonzero without breaking the graph).  This notebook does
+# not describe the case when you are interested in generalizing traces
+# of concrete executions.
 #
 # Most of the simplest graph capture mechanisms require shape
 # specialization, because they simply proceed by running an actual
@@ -306,7 +313,10 @@ CURRENT_GRAPH = Graph()
 # and record the operations that occur on them.  Our symbolic integers
 # in this example have a very impoverished interface; in fact they
 # support no operations at all, they simply have a name corresponding
-# to their name in the graph.
+# to their name in the graph.  (In a tracing JIT context, we might
+# secretly know what the actual values of our symbolic ints are, but
+# for conceptual clarity we do not allow ourselves this in this
+# notebook.)
 
 # +
 
@@ -549,6 +559,16 @@ def assert_int_eq(x: SymInt, y: SymInt):
 # the program, we have no idea what the size will be!  So the simplest
 # possible choice is to only report a SymInt as one if it is
 # *specialized* to be one (e.g., it is literally a one integer.)
+#
+# It's important to emphasize that this constitutes a UI divergence
+# from a traditional PyTorch program that tests if a size is 1; if
+# the shape is dynamic, we will report False, but if the shape HAPPENS
+# to later to be instantiated to be 1, an actual PyTorch program would
+# have reported True (whereas we have baked in trace behavior for it
+# being False).  This is another reason why it is pedagogically clearer
+# to avoid having real values "in your back pocket", because with them
+# the temptation is to just peek at the actual value to do the test
+# (and this results in a bunch of extra obligations to deal with.)
 
 
 def definitely_one(x: SymInt) -> bool:
@@ -801,18 +821,10 @@ interp_graph({s1: 4, s2: 4, a: va, b: vb}, da=da, db=db)
 
 # In fact, with our simple interpreter, we will fail the assert EVEN if
 # the original source program would have worked by broadcasting a
-# one-sized dimension.  This might be undesirable, but there are some
-# other ways to solve the problem:
-#
-#   - Arguably, the symbolic integer assignments here are wrong:
-#     for the internal addition/multiplication to be non-broadcasting,
-#     the sizes of the two inputs have to be the same.  So we could
-#     require the user to give a more precise set of preconditions.
-#
-#   - Alternately, if we are operating as a lazy tensor, the
-#     preconditions just say when we need to invalidate an old trace
-#     (and build a new trace with the assumption that it is
-#     broadcasting).
+# one-sized dimension.  This is the sense in which true dynamic shapes
+# present a different UI: dynamic shapes tell the user, "Nuh uh, even
+# if this shape is accidentally one, I'm not going to let you broadcast
+# it because your code will break if you change the batch size later.")
 
 try:
     interp_graph({s1: 1, s2: 4, a: va, b: vb}, da=da, db=db)
@@ -975,7 +987,10 @@ interp_graph({a: torch.clamp(torch.randn(6), min=0)}, da=da)
 #   - Right now, the symbolic traces represent add/mul as their
 #     broadcasting versions.  It is easy to tweak it using
 #     `definitely_one` to explicitly represent the broadcasting
-#     using an expand first.
+#     using an expand first.  Note that the expand may be a no-op;
+#     if I broadcast (d0,) and (1,) together, I need to expand
+#     (1,) to (d0,); but this is a no-op if d0 happens to be 1
+#     (I'm stil obligated to record this expand though!)
 #
 #   - XLA's dynamic shape support also tracks upper bounds for all
 #     symbolic sizes.  Incorporate support for that here.
