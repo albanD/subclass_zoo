@@ -51,21 +51,26 @@
 # notebook)
 
 
-import functools
 import itertools
-import traceback
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union, NoReturn
 import operator
+from dataclasses import dataclass, field
 from functools import reduce
+from typing import (
+    Any,
+    Dict,
+    List,
+    NoReturn,
+    Optional,
+)
 
 import torch
 
 torch.manual_seed(0)
 
+
 def assert_never(x: NoReturn) -> NoReturn:
     raise AssertionError("Unhandled type: {}".format(type(x).__name__))
+
 
 @dataclass
 class FreshSupply:
@@ -83,12 +88,14 @@ fresh_int = FreshSupply("i")
 fresh_bool = FreshSupply("b")
 fresh_size = FreshSupply("s")
 
+
 def reset():
     fresh_var.fresh = 0
     fresh_int.fresh = 0
     fresh_bool.fresh = 0
     fresh_size.fresh = 0
     CURRENT_GRAPH.nodes.clear()
+
 
 @dataclass(frozen=True)
 class Op:
@@ -111,6 +118,7 @@ var_expand = Op("var_expand")  # a, size
 
 # if you want to do on the fly
 
+
 @dataclass
 class Node:
     op: Op
@@ -126,14 +134,17 @@ class Node:
         params_str += ", ".join(f"{k}={v}" for k, v in self.params.items())
         return f"{outputs_str}{self.op}({inputs_str}{params_str})"
 
+
 @dataclass
 class Graph:
     nodes: List[Node] = field(default_factory=list)
 
     def __str__(self):
-        return '\n'.join(str(n) for n in self.nodes)
+        return "\n".join(str(n) for n in self.nodes)
+
 
 CURRENT_GRAPH = Graph()
+
 
 def tuplify(outs):
     if outs is None:
@@ -141,11 +152,13 @@ def tuplify(outs):
     else:
         return (outs,)
 
+
 def record(r, op, *args, **kwargs):
     n = Node(op, [a.name for a in args], [a.name for a in tuplify(r)], kwargs)
     print(n)
     CURRENT_GRAPH.nodes.append(n)
     return r
+
 
 class Guarded:
     name: str
@@ -153,6 +166,7 @@ class Guarded:
 
     def __repr__(self):
         return f"{self.name}~{self.value}"
+
 
 class GuardedBool(Guarded):
     value: bool
@@ -179,6 +193,7 @@ class GuardedInt(Guarded):
             # promote the int into a node
             other = record(GuardedInt(other), int_const, val=other)
         return record(GuardedBool(self.value == other.value), int_eq, self, other)
+
 
 class GuardedSize(Guarded):
     name: str
@@ -240,14 +255,22 @@ def broadcast(lhs: List[int], rhs: List[int]) -> List[int]:
             r.append(x)
     return GuardedSize.make(list(reversed(r)))
 
+
 def expand(self: Variable, size: GuardedSize) -> Variable:
     return record(Variable(self.value.expand(size.value)), var_expand, self, size)
+
 
 def add(self: Variable, rhs: Variable) -> Variable:
     shape = broadcast(self, rhs)
     self_expanded = expand(self, shape)
     rhs_expanded = expand(rhs, shape)
-    return record(Variable(self_expanded.value + rhs_expanded.value), var_add, self_expanded, rhs_expanded)
+    return record(
+        Variable(self_expanded.value + rhs_expanded.value),
+        var_add,
+        self_expanded,
+        rhs_expanded,
+    )
+
 
 # here we have some bailouts
 
@@ -269,10 +292,11 @@ def interp_node(rules, n: Node, env: Dict[str, Any]):
         assert len(outs) == len(n.outputs)
     except Exception:
         print(f"Failed during: {n}")
-        print('\n'.join(f'{k} = {v}' for k, v in env.items()))
+        print("\n".join(f"{k} = {v}" for k, v in env.items()))
         raise
     for k, v in zip(n.outputs, outs):
         env[k] = v
+
 
 def interp_graph(graph, rules, init: Optional[Dict[str, Any]] = None, print_env=False):
     if init:
@@ -285,8 +309,10 @@ def interp_graph(graph, rules, init: Optional[Dict[str, Any]] = None, print_env=
         for k, v in env.items():
             print(f"{k} = {v}")
 
+
 def assert_(b):
     assert b
+
 
 interp_rules = {
     bool_bailout: lambda b, *, expect: assert_(b == expect),
@@ -306,7 +332,7 @@ dependency_rules = {
     var_add: lambda a, b: a | b,
     var_mul: lambda a, b: a | b,
     var_size: lambda a: a,
-    var_expand: lambda a, b: b
+    var_expand: lambda a, b: b,
 }
 interp_graph(CURRENT_GRAPH, dependency_rules)
 
@@ -351,8 +377,7 @@ CURRENT_GRAPH = Graph()
 interp_graph(graph, shape_prop_rules)
 
 
-interp_graph(CURRENT_GRAPH, interp_rules, init={'sa': 8, 'sb': 1})
-
+interp_graph(CURRENT_GRAPH, interp_rules, init={"sa": 8, "sb": 1})
 
 
 """

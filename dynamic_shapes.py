@@ -37,11 +37,9 @@
 # happening to be 1024 this time.)
 
 # +
-import functools
 import itertools
 import traceback
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import torch

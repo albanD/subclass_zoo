@@ -14,12 +14,9 @@
 # ---
 
 # +
-import functools
-import itertools
 import traceback
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Dict, List
 
 import torch
 
@@ -70,6 +67,7 @@ v_mul = Op("v_mul")
 
 # +
 
+
 @dataclass(eq=False)
 class Node:
     op: Op
@@ -88,6 +86,7 @@ class Node:
         )
         return f"{self.op}({inputs_str}{params_str})"
 
+
 # -
 
 # And then we can write an interpreter for these inputs.  Notice that
@@ -105,9 +104,9 @@ INTERP_RULES[v_mul] = lambda x, y: x * y
 
 def interp_node(n: Node, env: Dict[Node, torch.Tensor]):
     if n.op is v_dynamic_param:
-        return env[n.params['name']]
+        return env[n.params["name"]]
     elif n.op is v_static_param:
-        r = env[n.params['name']]
+        r = env[n.params["name"]]
         assert (
             r.shape == n.params["size"]
         ), f"static shape mismatch: {r.shape} and {n.params['size']}"
@@ -115,12 +114,14 @@ def interp_node(n: Node, env: Dict[Node, torch.Tensor]):
     args = [interp_node(i, env) for i in n.inputs]
     return INTERP_RULES[n.op](*args, **n.params)
 
+
 # -
 
 # In actual torchdynamo, we can construct our IR directly via
 # bytecode analysis.  But this isn't really necessary for our
 # example here; we can use an ordinary tracer to construct the IR as
 # well.  Our tracer is very simple.
+
 
 @dataclass
 class Variable:
@@ -135,7 +136,9 @@ class Variable:
     def param(tensor: torch.Tensor, name: str):
         # Save the observed shape, but by default dynamic_param won't
         # check it!
-        return Variable(tensor, Node(v_dynamic_param, [], {"name": name, "size": tensor.shape}))
+        return Variable(
+            tensor, Node(v_dynamic_param, [], {"name": name, "size": tensor.shape})
+        )
 
     def __mul__(self, rhs: "Variable") -> "Variable":
         r_tensor = self.tensor * rhs.tensor
@@ -146,6 +149,7 @@ class Variable:
         r_tensor = self.tensor + rhs.tensor
         r_node = Node(v_add, [self.node, rhs.node])
         return Variable(r_tensor, r_node)
+
 
 # With this, we can run a simple example, print out the IR for it,
 # and then rerun it.  By default, we treat the inputs as dynamics,
@@ -172,6 +176,7 @@ print(interp_node(r.node, {"a": torch.randn(5), "b": torch.randn(1)}))
 
 # +
 
+
 def input_sources(node):
     r = set()
     for i in node.inputs:
@@ -180,12 +185,14 @@ def input_sources(node):
         r.add(node)
     return r
 
+
 def variable_size(self):
     for i in input_sources(self.node):
         # change it from dynamic to static.  (the parameter
         # already saved the size, we don't need to recover it)
         i.op = v_static_param
     return self.tensor.size()
+
 
 # -
 

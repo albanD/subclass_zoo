@@ -209,7 +209,6 @@ class Torch(Dispatcher):
         result = label(a), label(b)
         return result
 
-
     def lift(self, input, d):
         assert d is self
         return input
@@ -223,18 +222,20 @@ class Torch(Dispatcher):
 
 
 def custom_vjp_str(r, fwd_fn, bwd_fn, args):
-    arg_names = ', '.join([a.t_name for a in args])
+    arg_names = ", ".join([a.t_name for a in args])
     r_is_tensor = isinstance(r, torch.Tensor)
     if r_is_tensor:
         result_names = r.t_name
     else:
         result_names = [r.t_name for r in r]
         if len(result_names) == 1:
-            result_names = f'{result_names[0]},'
+            result_names = f"{result_names[0]},"
         else:
-            result_names = ', '.join(result_names)
+            result_names = ", ".join(result_names)
 
-    print(f"{result_names} = custom_vjp({fwd_fn.__name__}, {bwd_fn.__name__}, {arg_names})")
+    print(
+        f"{result_names} = custom_vjp({fwd_fn.__name__}, {bwd_fn.__name__}, {arg_names})"
+    )
 
 
 class Logger(Dispatcher):
@@ -502,11 +503,12 @@ class Autograd(Dispatcher):
 
         self.gradient_tape.append(
             TapeEntry(
-                inputs=[arg.t_name for arg in args], outputs=[r.t_name], propagate=propagate
+                inputs=[arg.t_name for arg in args],
+                outputs=[r.t_name],
+                propagate=propagate,
             )
         )
         return r, saved
-
 
     def lift(self, input, d):
         if d is self:
@@ -718,9 +720,10 @@ class Batched(Dispatcher):
     def custom_vjp(self, fwd_fn, bwd_fn, *args):
         def batchify(fn):
             def new_fn(d, *args):
-                new_d = Batched(d, length = self.length, name = 'GeneratedBatched')
+                new_d = Batched(d, length=self.length, name="GeneratedBatched")
                 result = fn(new_d, *args)
                 return result
+
             return new_fn
 
         # If we have Batched(Autograd(Torch()), then we would like the inner
@@ -1169,15 +1172,20 @@ d = Autograd(Torch())
 a = label(torch.rand(4))
 va = label(torch.rand(2, 4))
 
+
 def f_fwd(dispatcher, x):
     # Our convention is that f_fwd returns (outputs, "saved")
     return dispatcher.mul(x, x), x
 
+
 # Our convention is that f_bwd accepts (dispatcher, gradOutputs, "saved")
 def f_bwd(dispatcher, gradOutputs, x):
-    gO, = gradOutputs
+    (gO,) = gradOutputs
     # Should be gO * 2 * x, but we're gonna do gO * 32 * x to demonstrate things
-    return [dispatcher.mul(dispatcher.mul(gO, x), label(torch.tensor(32.), 'thirty_two'))]
+    return [
+        dispatcher.mul(dispatcher.mul(gO, x), label(torch.tensor(32.0), "thirty_two"))
+    ]
+
 
 # -
 
@@ -1195,10 +1203,11 @@ def run_grad(d):
     # Here's how to invoke custom_vjp.
     r, _ = d.custom_vjp(f_fwd, f_bwd, a)
     L3 = d.sum(r, name="L3")
-    dL3_a, = d.grad(L3, [a])
+    (dL3_a,) = d.grad(L3, [a])
 
     # Check that the gradients are indeed 32 * a
     assert torch.allclose(dL3_a, 32 * a)
+
 
 run_grad(d)
 
@@ -1206,17 +1215,18 @@ run_grad(d)
 def run_gradgrad(d2, d1):
     r, _ = d2.custom_vjp(f_fwd, f_bwd, a)
     L4 = d2.sum(r, name="L4")
-    dL4_a, = d2.grad(L4, [a])
+    (dL4_a,) = d2.grad(L4, [a])
 
     # Evidence that d2 respected the custom_vjp's f_bwd
     assert torch.allclose(dL4_a, 32 * a)
 
-    assert hasattr(dL4_a, 't_name')
-    dL4_a_sum = d1.sum(dL4_a, name='dL4_a_sum')
-    ddL4_a_a, = d1.grad(dL4_a_sum, [a])
+    assert hasattr(dL4_a, "t_name")
+    dL4_a_sum = d1.sum(dL4_a, name="dL4_a_sum")
+    (ddL4_a_a,) = d1.grad(dL4_a_sum, [a])
 
     # Evidence that d1 respected the custom_vjp's f_bwd
     assert torch.allclose(ddL4_a_a, torch.ones_like(a) * 32)
+
 
 d1 = Autograd(Logger(Torch(), name="Torch"), name="Autograd1", create_graph=False)
 d2 = Autograd(d1, name="Autograd2", create_graph=False)
@@ -1230,27 +1240,31 @@ run_gradgrad(d2, d1)
 
 # +
 
+
 def f_fwd(d, x):
     return d.mul(x, x), x
 
+
 def f_bwd(d, gradOutputs, x):
-    gO, = gradOutputs
+    (gO,) = gradOutputs
     # Should be gO * 2 * x, but we're gonna do gO * 32 * x to prove a point
-    return [d.mul(d.mul(gO, x), label(torch.ones_like(x) * 32., 'thirty_two'))]
+    return [d.mul(d.mul(gO, x), label(torch.ones_like(x) * 32.0, "thirty_two"))]
 
 
 d1 = Autograd(Torch(), name="Autograd1", create_graph=False)
 d2 = Batched(d1, length=2, name="Batched2")
 
-def run_gradvmap(d2: 'Batched', d1: 'Autograd'):
+
+def run_gradvmap(d2: "Batched", d1: "Autograd"):
     r, _ = d2.custom_vjp(f_fwd, f_bwd, va)
     L99 = d1.sum(r, name="L99")
-    dL99_a, = d1.grad(L99, [va])
+    (dL99_a,) = d1.grad(L99, [va])
 
     # As you can see, d1.grad still calls f_bwd.
     # The way we got this to work is that Batched.custom_vjp
     # calls custom_vjp on its inner dispatcher.
     # Scroll up to the implementation of Batched for more details.
     assert torch.allclose(dL99_a, 32 * va)
+
 
 run_gradvmap(d2, d1)
