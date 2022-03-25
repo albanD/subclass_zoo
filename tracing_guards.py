@@ -55,17 +55,9 @@
 # +
 
 import itertools
-import operator
-from dataclasses import dataclass, field
-from functools import reduce
 import traceback
-from typing import (
-    Any,
-    Dict,
-    List,
-    NoReturn,
-    Optional,
-)
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, NoReturn
 
 import torch
 
@@ -90,6 +82,7 @@ fresh_int = FreshSupply("i")
 fresh_bool = FreshSupply("b")
 fresh_size = FreshSupply("s")
 
+
 def reset():
     global CURRENT_GRAPH
     fresh_var.fresh = 0
@@ -98,6 +91,7 @@ def reset():
     fresh_size.fresh = 0
     CURRENT_GRAPH = Graph()
 
+
 # -
 
 # Once again, we need to define an IR for our traces.  Like in
@@ -105,12 +99,14 @@ def reset():
 # as an instance of the Op class, which is just a little wrapper
 # around strings.
 
+
 @dataclass(frozen=True)
 class Op:
     name: str
 
     def __str__(self):
         return self.name
+
 
 # Our operations are going to look slightly different this time.
 # In particular, I explicitly model booleans and size tuples (in
@@ -137,8 +133,10 @@ var_expand = Op("var_expand")  # a, size
 # can say what the concrete interpretation of all of these operators
 # should be.
 
+
 def assert_(b):
     assert b
+
 
 # Unlike conventional add/mul in PyTorch, these operators do not
 # broadcast (we will insert explicit expands)
@@ -146,9 +144,11 @@ def prim_add(a, b):
     assert a.shape == b.shape
     return torch.add(a, b)
 
+
 def prim_mul(a, b):
     assert a.shape == b.shape
     return torch.mul(a, b)
+
 
 def concrete_rules(**params):
     # bool -> bool
@@ -176,6 +176,7 @@ def concrete_rules(**params):
 # notebook, our nodes are truly in ANF (so inputs is just a list of
 # string names of other nodes.)
 
+
 @dataclass
 class Node:
     op: Op
@@ -191,6 +192,7 @@ class Node:
         params_str += ", ".join(f"{k}={v}" for k, v in self.params.items())
         return f"{outputs_str}{self.op}({inputs_str}{params_str})"
 
+
 @dataclass
 class Graph:
     nodes: List[Node] = field(default_factory=list)
@@ -198,11 +200,13 @@ class Graph:
     def __str__(self):
         return "\n".join(str(n) for n in self.nodes)
 
+
 def tuplify(outs):
     if outs is None:
         return tuple()
     else:
         return (outs,)
+
 
 def interp_node(rules, n: Node, env: Dict[str, Any]):
     try:
@@ -216,6 +220,7 @@ def interp_node(rules, n: Node, env: Dict[str, Any]):
     for k, v in zip(n.outputs, outs):
         env[k] = v
 
+
 def interp(graph, rules, print_env=False):
     env = {}
     for n in graph.nodes:
@@ -224,13 +229,14 @@ def interp(graph, rules, print_env=False):
         for k, v in env.items():
             print(f"{k} = {v}")
 
+
 # We can show it all works with a tiny example constructing the graph
 # manually by ourself.
 
 g = Graph()
-g.nodes.append(Node(var_placeholder, [], ['a'], {'name': 'a'}))
-g.nodes.append(Node(var_placeholder, [], ['b'], {'name': 'b'}))
-g.nodes.append(Node(var_add, ['a', 'b'], ['r']))
+g.nodes.append(Node(var_placeholder, [], ["a"], {"name": "a"}))
+g.nodes.append(Node(var_placeholder, [], ["b"], {"name": "b"}))
+g.nodes.append(Node(var_add, ["a", "b"], ["r"]))
 
 print(g)
 
@@ -242,11 +248,13 @@ interp(g, concrete_rules(a=torch.randn(4), b=torch.randn(4)), print_env=True)
 
 CURRENT_GRAPH = Graph()
 
+
 def record(r, op, *args, **kwargs):
     n = Node(op, [a.name for a in args], [a.name for a in tuplify(r)], kwargs)
     print(n)
     CURRENT_GRAPH.nodes.append(n)
     return r
+
 
 # The objects that we will perform tracing with, however, are going to
 # operate a bit differently.  Because we are in the context of a
@@ -262,6 +270,7 @@ def record(r, op, *args, **kwargs):
 # as well as a name saying how to reference them in the current graph
 # trace.
 
+
 class Guarded:
     name: str
     value: Any
@@ -272,6 +281,7 @@ class Guarded:
 
 # And then we will subclass Guarded for each type we support tracing in
 # our system.
+
 
 class GuardedBool(Guarded):
     value: bool
@@ -372,8 +382,10 @@ class Variable(Guarded):
         # choice!
         return self.value.dim()
 
+
 # With this change, we can write normal looking code, including
 # conditions on shapes, which we expect to be able to trace through.
+
 
 def broadcast(lhs: List[GuardedInt], rhs: List[GuardedInt]) -> List[GuardedInt]:
     r = []
@@ -389,12 +401,14 @@ def broadcast(lhs: List[GuardedInt], rhs: List[GuardedInt]) -> List[GuardedInt]:
             r.append(x)
     return GuardedSize.make(list(reversed(r)))
 
+
 # Elide expands when the sizes match
 def expand(self: Variable, size: GuardedSize) -> Variable:
     if self.shape == size:
         return self
     else:
         return record(Variable(self.value.expand(size.value)), var_expand, self, size)
+
 
 def add(self: Variable, rhs: Variable) -> Variable:
     shape = broadcast(self, rhs)
@@ -406,6 +420,7 @@ def add(self: Variable, rhs: Variable) -> Variable:
         self_expanded,
         rhs_expanded,
     )
+
 
 # Let's take a look at the trace produced by this code, and see
 # in particular what bailouts got produced.
@@ -431,13 +446,16 @@ v0 = add(a, b)
 # as before (we'll also assume that everything is well typed, which
 # it is, assuming the bailouts in the original program are sufficient).
 
+
 def shape_rules(**params):
     # bool -> GuardedBool
     # int -> GuardedInt
     # size -> GuardedSize
     # var -> GuardedSize !!!
     return {
-        bool_bailout: lambda b, *, expect: record(None, bool_bailout, b, expect=b.value),
+        bool_bailout: lambda b, *, expect: record(
+            None, bool_bailout, b, expect=b.value
+        ),
         bool_const: lambda *, val: val,
         int_eq: lambda a, b: a == b,
         int_const: lambda *, val: val,
@@ -451,6 +469,7 @@ def shape_rules(**params):
         var_expand: lambda a, size: size,
     }
 
+
 # Let's save our current trace, and reset the context for the new
 # trace we are construct by interpret our original trace with
 # the shape rules.
@@ -461,10 +480,12 @@ reset()
 # Now we can see that we get a graph with only integer/bool operations
 # in it!
 
-interp(graph, shape_rules(
-    a=[GuardedInt.placeholder(4, "a0")],
-    b=[GuardedInt.placeholder(4, "b0")]
-))
+interp(
+    graph,
+    shape_rules(
+        a=[GuardedInt.placeholder(4, "a0")], b=[GuardedInt.placeholder(4, "b0")]
+    ),
+)
 
 # We can run this graph, asking if a new set of concrete sizes
 # is valid or not.
@@ -477,14 +498,18 @@ except Exception:
 # We can also write a little printer for our trace to say what our
 # guards should be.
 
+
 def print_rules():
     return {
-        bool_bailout: lambda b, *, expect: print(f"assert {b}" if expect else f"assert not {b}"),
+        bool_bailout: lambda b, *, expect: print(
+            f"assert {b}" if expect else f"assert not {b}"
+        ),
         bool_const: lambda *, val: str(val),
         int_eq: lambda a, b: f"({a} == {b})",
         int_const: lambda *, val: str(val),
         int_placeholder: lambda *, name: name,
     }
+
 
 interp(CURRENT_GRAPH, print_rules())
 
