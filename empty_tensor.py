@@ -1,8 +1,5 @@
-from types import FunctionType
-
 import torch
 from base_tensor import BaseTensor
-from torch import Tensor
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
 
@@ -21,11 +18,16 @@ class EmptyTensor(BaseTensor):
     def __init__(self, elem):
         pass
 
+    def __repr__(self):
+        # TODO: this is wrong
+        return f'EmptyTensor({self.size()})'
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         def inflate(t):
             if isinstance(t, cls):
-                return torch.ones_like(t, device=t.device)
+                with no_dispatch():
+                    return torch.ones_like(t, device=t.device)
             else:
                 return t
 
@@ -47,7 +49,7 @@ class EmptyTensorTest(TestCase):
         x = EmptyTensor(torch.randn(4))
         y = EmptyTensor(torch.randn(4))
         r = x + y
-        print(r)
+        self.assertEqual(r.shape, (4,))
 
 
 if __name__ == "__main__":
