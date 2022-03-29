@@ -1041,9 +1041,9 @@ def vmap(f):
         # JAX doesn't seem to have a knob to do this)
         assert args
         old_d, *args = lift_and_unwrap_args(*args)
-        d = Batched(old_d, length=args[0].size()[0])
+        d = Batched(old_d, length=old_d.size(args[0])[0])
         for a in args:
-            assert a.size()[0] == d.length
+            assert old_d.size(a)[0] == d.length
         with dispatcher(d):
             # Rewrap all the arguments as batched tensors, then
             # unwrap any batched tensors that escape
@@ -1051,6 +1051,15 @@ def vmap(f):
 
     return wrapped_f
 
+# Small test: we want to make sure that we can run multiple layers of vmap and get
+# the right behavior
+x = FuncTensor(label(torch.randn(3, 4, 5)), DISPATCHER)
+ret = vmap(vmap(lambda a: a.unsqueeze(0)))(x)
+assert ret.size() == (3, 4, 1, 5)
+assert torch.allclose(ret.tensor, x.unsqueeze(2).tensor)
+
+# We should see a tensor of size (3, 4, 1, 5) because there's two layers of vmap
+# it's the equivalent of unsqueeze(0) when the tensor is (5,) and then adding (3, 4) back on
 
 # Now we can rerun our example using the high level grad/vmap functions!
 
