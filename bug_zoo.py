@@ -34,6 +34,22 @@ class BugZoo(TestCase):
         print(y.is_leaf)
         y.relu_()
 
+    @unittest.expectedFailure
+    def test_grad_fn(self):
+        class TestTensor(BaseTensor):
+            @classmethod
+            def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+                if func is torch.ops.aten.add.Tensor and 'alpha' in kwargs:
+                    # decompose it
+                    r = torch.add(args[0], args[1] * kwargs['alpha'])
+                    self.assertIsNone(r.grad_fn)
+                    return r
+                return super().__torch_dispatch__(func, types, args, kwargs)
+
+        x = TestTensor(torch.tensor(1.0)).requires_grad_()
+        y = TestTensor(torch.tensor(2.0)).requires_grad_()
+        torch.add(x, y, alpha=2)
+
 
 if __name__ == "__main__":
     run_tests()
