@@ -46,6 +46,7 @@ TODO
 - Nested tensor
 - Custom allocator mode (albanD)
 - Lazy tensor
+- Immutable tensor
 
 ## Work plan
 
