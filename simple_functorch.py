@@ -13,6 +13,43 @@
 #     name: python3
 # ---
 
+# what is pytorch?
+#   - library for machine learning
+#   - kernels + automatic differentiation
+#   - optimization
+#       resnet(image) -> classification
+#       resnet(Tensor) -> Tensor
+#
+#       actual_result = resnet(image)
+#       loss = (actual_result - expected_result).sum()
+#
+#       f(image)(p0, p1, ... pn) = loss
+#       dp0/loss ... dpn/loss  <~~ HOW???
+#   - how is AD implemented in PyTorch?
+#       reverse mode automatic differentiation
+#       
+#       sin, cos, tanh, matmul, linear, ...
+#       
+#       x = f(p)
+#       y = g(x)
+#       z = h(y)
+#       
+#       grad_y = h_backward(grad_z)
+#       grad_x = g_backward(grad_y)
+#       grad_p = f_backward(grad_x)
+#
+#
+# what is functorch?
+#
+#
+# what is it do?
+
+
+
+
+
+
+
 # This notebook walks through a self-contained implementation of
 # functorch, including support for both vjp and vmap combinators (using
 # PyTorch only to implement primitive tensor operations).  It follows
@@ -108,6 +145,8 @@ def label(t: Tensor, name: str = None):
     return t
 
 
+torch.add(torch.tensor([0.0, 0.1]), torch.tensor([0.3, 0.5])).sum()
+
 # So if we aren't going to have a wrapper around each tensor, how will
 # we actually implement our logic?  We will organize our various layers
 # of transformations as separate Dispatcher objects, which define
@@ -171,6 +210,8 @@ class Dispatcher:
 # variant (although this file is not currently setup to do so.)
 
 
+
+
 class Torch(Dispatcher):
     def mul(self, lhs, rhs):
         return label(torch.mul(lhs, rhs))
@@ -213,6 +254,9 @@ class Torch(Dispatcher):
         assert d is self
         return input
 
+
+x = Torch()
+x.add(torch.tensor(0.3), torch.tensor(0.5))
 
 # Dispatcher layers are composable via object composition: we can
 # imagine a stack of dispatchers, each one calling into the next.
@@ -307,7 +351,7 @@ class Logger(Dispatcher):
 # We will explicitly write out all of these calls before we add wrapper
 # class sugaring.
 
-d = Logger(Torch(), name="Torch")
+d = Logger(Logger(Torch(), name="Torch"), name="Torch2")
 print(d.add(d.ones(2), d.ones(2)))
 
 
@@ -357,6 +401,27 @@ class Autograd(Dispatcher):
         outputs = [r.t_name]
 
         # define backprop
+        
+        # 
+        # lhs = f(p)
+        # rhs = g(p)
+        # outputs = lhs * rhs
+        # L = rest_of_network(outputs)
+        #
+        # dL/dp
+        # dL/dlhs, dL/drhs
+        
+        # r = lhs * rhs
+        # dr/dlhs = rhs
+        # dr/drhs = lhs
+        #
+        # outputs = lhs * rhs
+        # L = rest_of_network(outputs)
+        #
+        # dL/doutputs = dL/dr
+        # dL/dinputs = dL/dlhs, dL/drhs
+        #
+        # dL/dlhs = dL/dr * dr/dlhs
         def propagate(dL_doutputs: List[Tensor]):
             (dL_dr,) = dL_doutputs
 
@@ -528,6 +593,26 @@ class Autograd(Dispatcher):
         def gather_grad(entries: List[str]):
             return [dL_d[entry] if entry in dL_d else None for entry in entries]
 
+        """
+      x = f(p)
+      y = g(x)
+      z = h(y)
+      
+      gradient_tape = [
+          TapeEntry(
+              inputs=["p"],
+              outputs=["x"],
+              propagate=f_backward
+          ),
+          g_backward,
+          h_backward
+      ]
+      
+      grad_y = h_backward(grad_z)
+      grad_x = g_backward(grad_y)
+      grad_p = f_backward(grad_x)
+        """
+        
         # propagate the gradient information backward
         for entry in reversed(self.gradient_tape):
             dL_doutputs = gather_grad(entry.outputs)
@@ -535,7 +620,6 @@ class Autograd(Dispatcher):
                 # optimize for the case where some gradient pathways are zero. See
                 # The note below for more details.
                 continue
-
             # perform chain rule propagation specific to each compute
             dL_dinputs = entry.propagate(dL_doutputs)
 
@@ -562,8 +646,31 @@ class Autograd(Dispatcher):
 
 # +
 torch.manual_seed(0)
-a, b = label(torch.rand(4)), label(torch.rand(4))
+a, b = label(torch.rand(1)), label(torch.rand(1))
 
+print("a", a)
+print("b", b)
+
+# f(a, b) = (a + b) * b = L
+# dL/da = ((a+b)*b)/da = d(a+b)/da * b + (a+b)*db/da = b
+# dL/db = d(a+b)/db * b + (a+b)*db/db = b + a + b
+#
+# dL/dL = 1.0
+#
+# L = t * b
+# dL/dt += b
+# dL/db += (t aka a + b)
+#
+# t = a + b
+# dt/da = 1
+# dt/db = 1
+#
+# dL/da += dL/dt * dt/da = b
+# dL/db += dL/dt * dt/db
+#
+# final values:
+# dL/da = b
+# dL/db = a + b + a
 
 def simple(d, a, b):
     t = d.add(a, b)
@@ -576,6 +683,7 @@ loss = simple(d, a, b)
 da, db = d.grad(loss, [a, b])
 print("da", da)
 print("db", db)
+print("b+a+b", b+a+b)
 # -
 
 # To compute higher order gradients, we have two options.  First,
