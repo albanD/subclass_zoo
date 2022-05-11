@@ -41,7 +41,7 @@ class ProgressiveLoweringTensorTest(TestCase):
         x.add(2).relu()
         # add call is low level aten op; relu call is high level torch
         # op
-        self.assertEqual(CALLED, [torch.ops.aten.add, torch.Tensor.relu])
+        self.assertEqual(CALLED, [torch.ops.aten.add.Tensor, torch.Tensor.relu])
 
 
 if __name__ == "__main__":
