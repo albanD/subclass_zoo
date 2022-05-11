@@ -27,14 +27,13 @@ class BugZoo(TestCase):
 
         SuperDispatchSegfaultTensor(torch.tensor(1.0)).neg()
 
-    @unittest.expectedFailure
+    # Fixed!
     def test_trivial_inplace(self):
         x = TrivialTensorViaInheritance(torch.tensor(1.0))
         y = x * torch.tensor(1.0, requires_grad=True)
-        print(y.is_leaf)
         y.relu_()
 
-    @unittest.expectedFailure
+    # Fixed!
     def test_grad_fn(self):
         class TestTensor(BaseTensor):
             @classmethod

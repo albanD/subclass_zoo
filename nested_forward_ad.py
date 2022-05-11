@@ -6,6 +6,7 @@ from torch.testing._internal.common_utils import (
     TestCase, run_tests, disable_gc, parametrize,
     instantiate_parametrized_tests
 )
+from torch.overrides import enable_reentrant_dispatch
 
 import functools
 import contextlib
@@ -101,10 +102,11 @@ class ForwardADTensor(BaseTensor):
                     return cls(t, level=max_level, ignore_no_grad=ignore_no_grad)
             return t
 
-        return tree_map(
-            wrap,
-            func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
-        )
+        with enable_reentrant_dispatch():
+            return tree_map(
+                wrap,
+                func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
+            )
 
 class NestedForwardADTest(TestCase):
     def test_basic(self):
