@@ -30,12 +30,10 @@ class FakeTensor(BaseTensor):
 
     def __init__(self, elem, device: Union[torch.device, str]):
         # elem does not need to be recorded, because FakeTensor *is a* elem
-        meta_device = torch.device(type="meta")
-        assert elem.device == meta_device
-        assert device != meta_device
-        self.fake_device = (
-            device if isinstance(device, torch.device) else torch.device(device)
-        )
+        assert elem.device.type == "meta"
+        device if isinstance(device, torch.device) else torch.device(device)
+        assert device.type != "meta"
+        self.fake_device = device
 
     @staticmethod
     def from_tensor(t):
@@ -93,22 +91,22 @@ class FakeTensor(BaseTensor):
 
         # cpu - zero-dim tensors can be called in cuda kernels,
         # so overwrite cuda kernels
-        existing_device = None
+        common_device = None
         is_cpu_zero_dim = None
 
         def find_common_device(t):
-            nonlocal existing_device
+            nonlocal common_device
             nonlocal is_cpu_zero_dim
             if not isinstance(t, cls):
                 return
 
-            if existing_device is None:
-                existing_device = t.device
+            if common_device is None:
+                common_device = t.device
                 is_cpu_zero_dim = cpu_zero_dim(t)
                 return
 
             t_is_cpu_zero_dim = cpu_zero_dim(t)
-            if t.device == existing_device:
+            if t.device == common_device:
                 if is_cpu_zero_dim:
                     is_cpu_zero_dim = t_is_cpu_zero_dim
                 return
@@ -120,19 +118,22 @@ class FakeTensor(BaseTensor):
 
             # current device is from cpu 0 dim tensor, overwrite
             if is_cpu_zero_dim:
-                existing_device = t.device
+                common_device = t.device
+                is_cpu_zero_dim = t_is_cpu_zero_dim
                 return
 
             # mismatching devices of non-zero dim tensors, throw
             # This might be valid behavior and need to be explicitly modeled, e.g. reshape_as
             raise Exception(
-                f"Unhandled FakeTensor Device Propagation for {func}, found two different devices {existing_device}, {t.device}"
+                f"Unhandled FakeTensor Device Propagation for {func}, found two different devices {common_device}, {t.device}"
             )
 
         tree_map(find_common_device, args)
         tree_map(find_common_device, kwargs)
 
-        return tree_map(partial(wrap, device=existing_device), r)
+        assert common_device != None, f"Could not find common device for {func}"
+
+        return tree_map(partial(wrap, device=common_device), r)
 
 
 class FakeTensorTest(TestCase):
@@ -157,6 +158,14 @@ class FakeTensorTest(TestCase):
         out = x + y
         self.assertEqual(out.shape, (4, 4))
         self.assertEqual(out.device, y.device)
+
+    def test_throw(self):
+        x = FakeTensor.from_tensor(torch.tensor(0.0))
+        y = FakeTensor.from_tensor(torch.rand([4, 4], device="cuda"))
+        z = FakeTensor.from_tensor(torch.rand([4, 4], device="cpu"))
+        self.assertRaises(
+            Exception, lambda: torch.lerp(x, y, z)
+        )
 
 if __name__ == "__main__":
     run_tests()
