@@ -4,7 +4,7 @@ import torch
 
 import torch.nn
 from torch.testing._internal.common_utils import run_tests, TestCase
-from torch.utils._python_dispatch import enable_python_mode
+from torch.utils._python_dispatch import enable_torch_dispatch_mode
 from torch.utils._pytree import tree_flatten, tree_map
 
 aten = torch.ops.aten
@@ -392,7 +392,7 @@ class PythonMetaTensorTest(TestCase):
         self.assertEqual(r, torch.empty((2, 3), dtype=torch.float, device="meta"))
 
     def test_embedding_via_mode(self):
-        with enable_python_mode(PythonMetaTensorMode):
+        with enable_torch_dispatch_mode(PythonMetaTensorMode):
             embedding = torch.nn.Embedding(10, 3, device="meta")
             input = torch.empty((2, 4), dtype=torch.long, device="meta")
             r = embedding(input)
@@ -401,7 +401,7 @@ class PythonMetaTensorTest(TestCase):
             )
 
     def test_embedding_bag_via_mode(self):
-        with enable_python_mode(PythonMetaTensorMode):
+        with enable_torch_dispatch_mode(PythonMetaTensorMode):
             embedding_sum = torch.nn.EmbeddingBag(10, 3, mode="sum", device="meta")
             input = torch.empty(8, dtype=torch.long, device="meta")
             offsets = torch.empty(2, dtype=torch.long, device="meta")

@@ -1,6 +1,6 @@
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
-from torch.utils._python_dispatch import enable_python_mode
+from torch.utils._python_dispatch import enable_torch_dispatch_mode
 
 """
 From Christian:
@@ -42,7 +42,7 @@ class SparseOutputMode(torch.Tensor):
 
 
 def sparse_output(func, *args, **kwargs):
-    with enable_python_mode(SparseOutputMode):
+    with enable_torch_dispatch_mode(SparseOutputMode):
         return func(*args, **kwargs)
 
 
