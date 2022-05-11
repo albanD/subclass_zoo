@@ -5,6 +5,7 @@ from base_tensor import BaseTensor
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
 from utils import fill_defaults
+from torch.overrides import enable_reentrant_dispatch
 
 # This file describes how to use wrapper tensors (ala TrivialTensorViaComposition)
 # to override autograd from __torch_dispatch__.  Ordinarily,
@@ -57,18 +58,19 @@ class InnerAutogradTensor(BaseTensor):
             else:
                 return t
 
-        # Override gradient behavior
-        if func == torch.ops.aten.embedding.default:
-            args = fill_defaults(args, 5, [-1, False, False])
-            weight, indices, padding_idx, scale_grad_by_freq, _sparse = map(
-                unwrap, args
-            )
-            assert not kwargs
-            # Force sparse gradients.  We could have also done this by
-            # defining a custom autograd function.
-            return cls(func(weight, indices, padding_idx, scale_grad_by_freq, True))
+        with enable_reentrant_dispatch():
+            # Override gradient behavior
+            if func == torch.ops.aten.embedding.default:
+                args = fill_defaults(args, 5, [-1, False, False])
+                weight, indices, padding_idx, scale_grad_by_freq, _sparse = map(
+                    unwrap, args
+                )
+                assert not kwargs
+                # Force sparse gradients.  We could have also done this by
+                # defining a custom autograd function.
+                return cls(func(weight, indices, padding_idx, scale_grad_by_freq, True))
 
-        return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
+            return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
 
 
 class InnerAutogradTensorTest(TestCase):

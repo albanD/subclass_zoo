@@ -139,7 +139,7 @@ class NegativeTensorTest(TestCase):
         self.assertExpectedInline(
             x.physical_repr(),
             """\
-negative_view(tensor(1))""",
+negative_view(NegativeTensor(1))""",
         )
 
     def test_functional(self):

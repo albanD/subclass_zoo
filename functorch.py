@@ -7,6 +7,7 @@ from base_tensor import BaseTensor
 from torch import Tensor
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._pytree import tree_map
+from torch.overrides import enable_reentrant_dispatch
 
 from utils import no_dispatch
 
@@ -76,7 +77,8 @@ class WrapperTensor(BaseTensor):
             else:
                 return t
 
-        return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
+        with enable_reentrant_dispatch():
+            return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
 
 
 def grad_and_value(func):
