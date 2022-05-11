@@ -87,10 +87,11 @@ class FakeTensor(BaseTensor):
             return tree_map(partial(wrap, device=new_kwargs["other"].device), r)
 
         def cpu_zero_dim(t):
-            return t.device == torch.device("cpu") and t.dim() == 0
+            return t.device.type == "cpu" and t.dim() == 0
 
         # cpu - zero-dim tensors can be called in cuda kernels,
-        # so overwrite cuda kernels
+        # so overwrite the common_device if it the only existing
+        # device comes from a cpu zero-dim tensor
         common_device = None
         is_cpu_zero_dim = None
 
