@@ -28,9 +28,9 @@ jobs:
           python3 -mpip install --pre torch --extra-index-url https://download.pytorch.org/whl/nightly/cpu
           python3 -c "import torch;print('All Ok!')"
 
-      - name: Install pytest
+      - name: Install Dependencies
         run: |
-          python3 -mpip install pytest
+          python3 -mpip install -r requirements.txt
 
       - name: Run test
         run: |
