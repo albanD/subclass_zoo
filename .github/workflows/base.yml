@@ -34,5 +34,5 @@ jobs:
 
       - name: Run test
         run: |
-          pytest ./*.pyg
+          pytest ./*.py
 
