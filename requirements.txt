@@ -1,0 +1,6 @@
+# These requirements are needed to be able to run all the tests
+# Anything added here will automatically be installed in CI
+pytest
+numpy
+sympy
+expecttest
