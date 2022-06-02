@@ -25,7 +25,11 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          python3 -mpip install lintrunner black
+          python3 -mpip install lintrunner
+
+      - name: Run lint init
+        run: |
+          lintrunner init
 
       - name: Run lint
         run: |
