@@ -12,8 +12,8 @@ jobs:
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
-        # with:
-        #   ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup miniconda
         uses: conda-incubator/setup-miniconda@v2
@@ -28,7 +28,11 @@ jobs:
           python3 -mpip install --pre torch --extra-index-url https://download.pytorch.org/whl/nightly/cpu
           python3 -c "import torch;print('All Ok!')"
 
+      - name: Install pytest
+        run: |
+          python3 -mpip install pytest
+
       - name: Run test
         run: |
-          pytest ./*.py
+          pytest ./*.pyg
 
