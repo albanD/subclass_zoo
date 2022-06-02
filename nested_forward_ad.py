@@ -3,8 +3,11 @@ from torch.autograd import forward_ad as fwAD
 from torch import Tensor
 from torch.utils._pytree import tree_map
 from torch.testing._internal.common_utils import (
-    TestCase, run_tests, disable_gc, parametrize,
-    instantiate_parametrized_tests
+    TestCase,
+    run_tests,
+    disable_gc,
+    parametrize,
+    instantiate_parametrized_tests,
 )
 from torch.overrides import enable_reentrant_dispatch
 
@@ -31,7 +34,9 @@ class ForwardADTensor(BaseTensor):
         with no_dispatch():
             primal, tangent = fwAD.unpack_dual(dual_t)
         # Ensure we actually have a dual Tensor
-        assert ignore_no_grad or tangent is not None, "ForwardADTensor can only wrap Tensors with forward gradients"
+        assert (
+            ignore_no_grad or tangent is not None
+        ), "ForwardADTensor can only wrap Tensors with forward gradients"
         # Ensure that nesting is happening in the right order
         if isinstance(dual_t, cls):
             assert dual_t.level < level, "Level ordering is wrong!"
@@ -76,7 +81,6 @@ class ForwardADTensor(BaseTensor):
         tree_map(find_level, args)
         tree_map(find_level, kwargs)
 
-
         def matches_level(t):
             return isinstance(t, cls) and t.level == max_level
 
@@ -89,7 +93,10 @@ class ForwardADTensor(BaseTensor):
                 # If we get a forward AD Tensor here, its level have been handled in the dispatcher
                 # call that lead to this torch dispatch. So now we want to just consider it as a
                 # constant for level during the next call into the dispatcher.
-                if isinstance(t, torch.Tensor) and fwAD.unpack_dual(t).tangent is not None:
+                if (
+                    isinstance(t, torch.Tensor)
+                    and fwAD.unpack_dual(t).tangent is not None
+                ):
                     return fwAD.unpack_dual(t).primal
                 return t
 
@@ -104,9 +111,9 @@ class ForwardADTensor(BaseTensor):
 
         with enable_reentrant_dispatch():
             return tree_map(
-                wrap,
-                func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
+                wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
             )
+
 
 class NestedForwardADTest(TestCase):
     def test_basic(self):
@@ -214,7 +221,6 @@ class NestedForwardADTest(TestCase):
             self.assertEqual(elem, t_t * 2 * t_p)
             self.assertEqual(fwAD.unpack_dual(elem).tangent, t2_t * 2 * t_p)
 
-
     def test_no_confusion(self):
         # This test ensure that we don't do "perturbation confusion"
         # meaning that gradients at each levels are indeed computed independently
@@ -237,9 +243,5 @@ class NestedForwardADTest(TestCase):
             self.assertEqual(mixed_out_lvl0_t, t_t * t2_p)
 
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_tests()
-
-
-

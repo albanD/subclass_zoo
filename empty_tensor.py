@@ -5,14 +5,19 @@ from torch.utils._pytree import tree_map
 
 from utils import no_dispatch
 
+
 class EmptyTensor(BaseTensor):
     @staticmethod
     def __new__(cls, elem):
         return torch.Tensor._make_wrapper_subclass(
-            cls, elem.size(),
-            strides=elem.stride(), storage_offset=elem.storage_offset(),
-            dtype=elem.dtype, layout=elem.layout, requires_grad=elem.requires_grad,
-            device=elem.device
+            cls,
+            elem.size(),
+            strides=elem.stride(),
+            storage_offset=elem.storage_offset(),
+            dtype=elem.dtype,
+            layout=elem.layout,
+            requires_grad=elem.requires_grad,
+            device=elem.device,
         )
 
     def __init__(self, elem):
@@ -20,7 +25,7 @@ class EmptyTensor(BaseTensor):
 
     def __repr__(self):
         # TODO: this is wrong
-        return f'EmptyTensor({self.size()})'
+        return f"EmptyTensor({self.size()})"
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
@@ -37,11 +42,12 @@ class EmptyTensor(BaseTensor):
             else:
                 return t
 
-        return tree_map(deflate, super().__torch_dispatch__(
-            func, types,
-            tree_map(inflate, args),
-            tree_map(inflate, kwargs)
-        ))
+        return tree_map(
+            deflate,
+            super().__torch_dispatch__(
+                func, types, tree_map(inflate, args), tree_map(inflate, kwargs)
+            ),
+        )
 
 
 class EmptyTensorTest(TestCase):

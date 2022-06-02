@@ -1,0 +1,17 @@
+[[linter]]
+code = 'BLACK'
+include_patterns = ['**/*.py']
+command = [
+    'python3',
+    '.github/black_linter.py',
+    '--',
+    '@{{PATHSFILE}}'
+]
+init_command = [
+    'python3',
+    '-mpip',
+    'install',
+    'black==22.3.0',
+    '{{DRYRUN}}', # Dry run means crash here
+]
+is_formatter = true
