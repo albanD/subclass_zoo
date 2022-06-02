@@ -13,7 +13,11 @@ class MyDeviceTensor(torch.Tensor):
     @staticmethod
     def __new__(cls, size, dtype, raw_data=None, requires_grad=False):
         # Use a meta Tensor here to be used as the wrapper
-        return torch.Tensor._make_subclass(cls, torch.empty(size, dtype=dtype, device="meta"), require_grad=requires_grad)
+        return torch.Tensor._make_subclass(
+            cls,
+            torch.empty(size, dtype=dtype, device="meta"),
+            require_grad=requires_grad,
+        )
 
     def __init__(self, size, dtype, raw_data=None, requires_grad=False):
         # Store any provided user raw_data
@@ -31,13 +35,19 @@ class MyDeviceTensor(torch.Tensor):
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         if func in cls.IMPLEMENTATIONS:
             try:
+
                 def super_fn(*args, **kwargs):
-                    return super(cls, MyDeviceTensor).__torch_dispatch__(func, types, args, kwargs)
+                    return super(cls, MyDeviceTensor).__torch_dispatch__(
+                        func, types, args, kwargs
+                    )
+
                 return cls.IMPLEMENTATIONS[func](super_fn, *args, **kwargs or {})
             except Exception as e:
                 print(e)
                 raise e
-        raise RuntimeError(f"No implementation for 'my_device' for {func}, {args}, {kwargs}")
+        raise RuntimeError(
+            f"No implementation for 'my_device' for {func}, {args}, {kwargs}"
+        )
 
 
 # Convenient wrapper to register functions
@@ -45,7 +55,9 @@ def implements(func):
     def _inner_fn(impl):
         MyDeviceTensor.IMPLEMENTATIONS[func] = impl
         return impl
+
     return _inner_fn
+
 
 # Add some ops
 @implements(aten.add.Tensor)
@@ -55,6 +67,7 @@ def add(super_fn, t1, t2):
     out = t1.raw_data + t2.raw_data
     return MyDeviceTensor(t1.size(), t1.dtype, raw_data=out)
 
+
 @implements(aten.mul.Tensor)
 def mul(super_fn, t1, t2):
     # If unsure what should be the result's properties, you can
@@ -63,6 +76,7 @@ def mul(super_fn, t1, t2):
 
     out = t1.raw_data * t2.raw_data
     return MyDeviceTensor(meta_out.size(), meta_out.dtype, raw_data=out)
+
 
 # Add some trivial ops that need impl
 @implements(aten.detach.default)
@@ -84,6 +98,7 @@ class MyDeviceMode(torch.Tensor):
             # the super() impl
             with torch._C.DisableTorchFunction():
                 return func(*args, **kwargs)
+
         if func in cls.IMPLEMENTATIONS:
             try:
                 return cls.IMPLEMENTATIONS[func](super_fn, *args, **kwargs or {})
@@ -93,12 +108,15 @@ class MyDeviceMode(torch.Tensor):
         # This is just a no-op for all the non-factory functions:
         return super_fn(*args, **kwargs or {})
 
+
 # Convenient wrapper to register functions
 def implements_factory(func):
     def _inner_fn(impl):
         MyDeviceMode.IMPLEMENTATIONS[func] = impl
         return impl
+
     return _inner_fn
+
 
 # Globally enable the mode
 holder = enable_torch_function_mode(MyDeviceMode)
@@ -124,7 +142,10 @@ def get_factory_wrapper(func):
             return super_fn(size, **kwargs)
 
         return MyDeviceTensor(size, kwargs.get("dtype", torch.float32), func(size))
+
     return inner
+
+
 implements_factory(torch.rand)(get_factory_wrapper(np.random.rand))
 implements_factory(torch.arange)(get_factory_wrapper(np.arange))
 implements_factory(torch.empty)(get_factory_wrapper(np.empty))
@@ -168,4 +189,3 @@ if __name__ == "__main__":
     print(t2)
     print("t2.to('cpu'):")
     print(t2.to("cpu"))
-
