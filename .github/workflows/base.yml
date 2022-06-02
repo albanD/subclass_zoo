@@ -1,0 +1,34 @@
+name: Base tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  linux-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        # with:
+        #   ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup miniconda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          auto-update-conda: true
+          python-version: 3.8
+          activate-environment: build
+          miniconda-version: 4.7.12
+
+      - name: Install PyTorch
+        run: |
+          python3 -mpip install --pre torch --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+          python3 -c "import torch;print('All Ok!')"
+
+      - name: Run test
+        run: |
+          pytest ./*.py
+
