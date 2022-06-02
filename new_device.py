@@ -118,9 +118,11 @@ def implements_factory(func):
     return _inner_fn
 
 
-# Globally enable the mode
-holder = enable_torch_function_mode(MyDeviceMode)
-holder.__enter__()
+def enable_my_device():
+    # Globally enable the mode
+    holder = enable_torch_function_mode(MyDeviceMode)
+    holder.__enter__()
+
 
 # And some factory functions
 # By hand
@@ -152,6 +154,8 @@ implements_factory(torch.empty)(get_factory_wrapper(np.empty))
 
 
 if __name__ == "__main__":
+    enable_my_device()
+
     # 3. Show what it does in practice
     size = (2, 2)
     t1 = MyDeviceTensor(size, torch.float32, np.ones(size))
