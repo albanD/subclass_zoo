@@ -78,7 +78,9 @@ class WrapperTensor(BaseTensor):
                 return t
 
         with enable_reentrant_dispatch():
-            return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
+            return tree_map(
+                wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
+            )
 
 
 def grad_and_value(func):

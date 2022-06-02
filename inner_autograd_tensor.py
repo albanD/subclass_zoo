@@ -70,7 +70,9 @@ class InnerAutogradTensor(BaseTensor):
                 # defining a custom autograd function.
                 return cls(func(weight, indices, padding_idx, scale_grad_by_freq, True))
 
-            return tree_map(wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs)))
+            return tree_map(
+                wrap, func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
+            )
 
 
 class InnerAutogradTensorTest(TestCase):

@@ -54,6 +54,7 @@ static inline std::vector<typename IntArrayRef::value_type> contiguous_strides(
 
 # And a port to Python:
 
+
 def contiguous_strides(sizes: List[int]):
     dims = len(sizes)
     strides = []
@@ -64,12 +65,13 @@ def contiguous_strides(sizes: List[int]):
             strides[i] = strides[i + 1] * sp.Max(sizes[i + 1], 1)
     return strides
 
+
 print(contiguous_strides([2, 3, 5]))
 
 # Let's look at the symbolic output of this function.  When only the batch
 # dimension is dynamic, things are pretty simple:
 
-x = sp.symbols('x')
+x = sp.symbols("x")
 print(contiguous_strides([x, 3, 5]))
 
 # However, if an inner dimension is dynamic, the dynamic shape variable
@@ -113,11 +115,13 @@ bool TensorImpl::compute_contiguous() const {
 # In Python (note that we will use the suffix branchy to refer
 # to code which branches on the concrete value of sizes/strides):
 
+
 def compute_numel(sizes: List[int]):
     numel = 1
     for s in sizes:
         numel *= s
     return numel
+
 
 def compute_contiguous_branchy(sizes: List[int], strides: List[int]):
     is_contiguous = True
@@ -132,6 +136,7 @@ def compute_contiguous_branchy(sizes: List[int], strides: List[int]):
                 is_contiguous = False
                 break
     return is_contiguous
+
 
 # When a dimension has size 1, we are indifferent to the stride at that
 # dimension:
@@ -161,13 +166,15 @@ print(compute_contiguous_branchy([3, 0, 5], [123456, 999999, 424242]))
 
 GUARDS = []
 
+
 def is_constant(e):
-    if hasattr(e, 'is_constant'):
+    if hasattr(e, "is_constant"):
         return e.is_constant()
     elif e is sp.true or e is sp.false:
         return True
     else:
         return False
+
 
 class SymObject:
     def __post_init__(self):
@@ -175,6 +182,7 @@ class SymObject:
             self.expr = sp.sympify(self.val)
         elif not isinstance(self.expr, sp.Expr):
             self.expr = sp.sympify(self.expr)
+
 
 @dataclass
 class SymBool(SymObject):
@@ -192,15 +200,18 @@ class SymBool(SymObject):
                     GUARDS.append(sp.Not(self.expr))
         return self.val
 
+
 def logical_and(self: bool, other: bool):
     if isinstance(self, SymBool) and isinstance(other, SymBool):
         return SymBool(self.val and other.val, sp.And(self.expr, other.expr))
     return sp.And(self, other)
 
+
 def logical_or(self: bool, other: bool):
     if isinstance(self, SymBool) and isinstance(other, SymBool):
         return SymBool(self.val or other.val, sp.Or(self.expr, other.expr))
     return sp.Or(self, other)
+
 
 @dataclass
 class SymInt(SymObject):
@@ -235,8 +246,10 @@ class SymInt(SymObject):
             other = SymInt(other)
         return SymInt(self.val * other.val, sp.Mul(self.expr, other.expr))
 
+
 def I(val, expr=None):
     return SymInt(val, expr)
+
 
 # -
 
@@ -247,10 +260,11 @@ def I(val, expr=None):
 x1, x2, x3, y1, y2, y3 = sp.symbols("x1 x2 x3 y1 y2 y3")
 
 GUARDS.clear()
-print(compute_contiguous_branchy(
-    [I(3, x1), I(1, x2), I(5, x3)],
-    [I(5, y1), I(99999, y2), I(1, y3)]
-))
+print(
+    compute_contiguous_branchy(
+        [I(3, x1), I(1, x2), I(5, x3)], [I(5, y1), I(99999, y2), I(1, y3)]
+    )
+)
 
 # We see that this tensor is contiguous...
 
@@ -266,19 +280,17 @@ print(GUARDS)
 # can eliminate the branches, giving a symbolic expression with no
 # guards.
 
+
 def compute_contiguous(sizes, strides):
     is_contiguous = True
     z = 1
     for d in range(len(sizes) - 1, -1, -1):
         is_contiguous = logical_and(
-            is_contiguous,
-            logical_or(
-                sp.Eq(sizes[d], 1),
-                sp.Eq(strides[d], z)
-            )
+            is_contiguous, logical_or(sp.Eq(sizes[d], 1), sp.Eq(strides[d], z))
         )
         z *= sizes[d]
     return logical_or(sp.Eq(compute_numel(sizes), 0), is_contiguous)
+
 
 # TODO: prove these two implementations are equivalent, somehow
 

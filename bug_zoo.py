@@ -38,9 +38,9 @@ class BugZoo(TestCase):
         class TestTensor(BaseTensor):
             @classmethod
             def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-                if func is torch.ops.aten.add.Tensor and 'alpha' in kwargs:
+                if func is torch.ops.aten.add.Tensor and "alpha" in kwargs:
                     # decompose it
-                    r = torch.add(args[0], args[1] * kwargs['alpha'])
+                    r = torch.add(args[0], args[1] * kwargs["alpha"])
                     self.assertIsNone(r.grad_fn)
                     return r
                 return super().__torch_dispatch__(func, types, args, kwargs)

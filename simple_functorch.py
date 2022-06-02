@@ -1051,6 +1051,7 @@ def vmap(f):
 
     return wrapped_f
 
+
 # Small test: we want to make sure that we can run multiple layers of vmap and get
 # the right behavior
 x = FuncTensor(label(torch.randn(3, 4, 5)), DISPATCHER)
