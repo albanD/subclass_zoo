@@ -56,9 +56,10 @@ class QuantizedTensor(Tensor):
         QUANT_DTYPE_SIZE = 1.5  # each quantized element is 12 bits
         # quantize the tensor
         new_size = inp.numel() * QUANT_DTYPE_SIZE
+        assert new_size % inp.element_size() == 0
         new_size_elems = int(new_size / inp.element_size())
         # new_ones to copy all other properties from inp
-        raw_data = 5.5 * inp.new_ones(new_size_elems)  # 5.5 is arbitrary
+        raw_data = 2.0 * inp.new_ones(new_size_elems)  # 2.0 is arbitrary
         return cls(inp.size(), inp.dtype, raw_data)
 
     def to_tensor(self, dtype=None):
@@ -189,22 +190,21 @@ class QuantizedTensorTest(TestCase):
 
     def test_grad(self):
         # compute gradient for an op that is a mix of quantized and not quantized
-        t1 = QuantizedTensor.from_tensor(torch.rand(2, 3)).requires_grad_(True)
-        t2 = torch.rand(4, 2, requires_grad=True)
+        t1 = QuantizedTensor.from_tensor(torch.rand(2, 4)).requires_grad_(True)
+        t2 = 3.0 * torch.ones((4, 2), requires_grad=True)
         out = t2.mm(t1)
         out.sum().backward()
-        self.assertEqual(out.size(), (4, 3))
+        self.assertEqual(out.size(), (4, 4))
 
         # Do the same thing with plain Tensors
         new_t1 = t1.detach().to_tensor().requires_grad_()
         new_t2 = t2.detach().clone().requires_grad_()
         new_out = new_t2.mm(new_t1)
         new_out.sum().backward()
-        self.assertEqual(new_out.size(), (4, 3))
+        self.assertEqual(new_out.size(), (4, 4))
 
         # Make sure the gradients are the same
         self.assertEqual(new_t1.grad, t1.grad)
-        self.assertEqual(new_t2.grad, t2.grad)
 
 
 if __name__ == "__main__":
