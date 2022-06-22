@@ -63,7 +63,7 @@ class DataParallelTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-
+        print(func)
         def unwrap_with_position(pos):
             def get_element(e):
                 return e.elem[pos] if isinstance(e, DataParallelTensor) else e
@@ -74,18 +74,32 @@ class DataParallelTensor(torch.Tensor):
             outs.append(func(*tree_map(unwrap_with_position(pos), args), **tree_map(unwrap_with_position(pos), kwargs)))
         # outs = func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
 
-        def wrap(e):
+        def get_element_type (lis):
+            assert(isinstance(lis, list))
+            return type(lis[0])
+
+        def wrap(e, func):
             if e is None:
                 return torch.empty(())
-            return DataParallelTensor(e, func) if isinstance(e, torch.Tensor) else e
+            elem_type = get_element_type(e)
 
-        # outs = tree_map(wrap, outs)
-        outs = DataParallelTensor(outs, func)
+            if(elem_type == torch.Tensor):
+                return DataParallelTensor(outs, func)
+            elif(elem_type == list):
+                return list(DataParallelTensor(list(t), func) for t in zip(*e))
+            elif(elem_type == tuple):
+                return tuple(DataParallelTensor(list(t), func)for t in zip(*e))
+
+        #outs = tree_map(wrap, outs)
+        outs = wrap(outs, func)
         return outs
 
 print(_get_all_device_indices())
-test_tensor = torch.randn(5, device = 'cuda')
+test_tensor = torch.randn(5, device = 'cuda', requires_grad=True)
+test_tensor.cos().cos().sum().backward()
+exit()
 dp_tensor = DataParallelTensor(test_tensor, None ,True)
-res_tensor = dp_tensor.cos()
+res_tensor = dp_tensor.cos().cos().sum()
 print(res_tensor)
+res_tensor.backward()
     
