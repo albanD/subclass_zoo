@@ -38,8 +38,12 @@ class DataParallelTensor(torch.Tensor):
             requires_grad=elem.requires_grad,
         )
             r.elem = []
-            for device_id in r.device_ids:
-                r.elem.append(elem.to(device = device_id))
+            with torch.no_grad():
+                for device_id in r.device_ids:
+                    t:torch.Tensor = elem.to(device = device_id)
+                    t.requires_grad = elem.requires_grad
+                    r.elem.append(t)
+                    t = None
         else:
             assert (isinstance(elem, list))
             r = torch.Tensor._make_wrapper_subclass(
@@ -52,6 +56,11 @@ class DataParallelTensor(torch.Tensor):
             layout=elem[0].layout,
             requires_grad=elem[0].requires_grad,
             )
+            pos = 0
+            for t, d_id in zip(elem, r.device_ids):
+                if(t.device != device(d_id)):
+                    elem[pos] = t.to(device = d_id)
+                pos += 1          
             r.elem = elem
 
         return r
@@ -63,7 +72,6 @@ class DataParallelTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        print(func)
         def unwrap_with_position(pos):
             def get_element(e):
                 return e.elem[pos] if isinstance(e, DataParallelTensor) else e
@@ -71,6 +79,9 @@ class DataParallelTensor(torch.Tensor):
 
         outs = []
         for pos in range(len(cls.device_ids)):
+            # import pdb
+            # if(func == aten.mul.Tensor):
+            #     pdb.set_trace()
             outs.append(func(*tree_map(unwrap_with_position(pos), args), **tree_map(unwrap_with_position(pos), kwargs)))
         # outs = func(*tree_map(unwrap, args), **tree_map(unwrap, kwargs))
 
@@ -96,10 +107,9 @@ class DataParallelTensor(torch.Tensor):
 
 print(_get_all_device_indices())
 test_tensor = torch.randn(5, device = 'cuda', requires_grad=True)
-test_tensor.cos().cos().sum().backward()
-exit()
 dp_tensor = DataParallelTensor(test_tensor, None ,True)
 res_tensor = dp_tensor.cos().cos().sum()
 print(res_tensor)
+test_tensor.to(device='cuda')
 res_tensor.backward()
     
