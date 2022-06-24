@@ -24,7 +24,7 @@ aten = torch.ops.aten
 
 class DPTensorType(Enum):
     replicated = auto() #This tensor will be replicated across all the devices
-    sharded = auto() #This tensor will be sharded along the first/batch dimension across the devices, NOTE: only equal chunk sizes are supported
+    distributed_batch = auto() #This tensor will be sharded along the first/batch dimension across the devices, NOTE: only equal chunk sizes are supported
     distributed = auto() # This is a list of tensors, each of which rests on different devices
 
 
@@ -44,19 +44,19 @@ class DataParallelTensor(torch.Tensor):
     __slots__ = ["elem"]
 
     @staticmethod
-    def __new__(cls, elem: Union[torch.Tensor,List[torch.Tensor],Tuple[torch.Tensor]], func:Optional[Any] = None, dpt_type:DPTensorType = DPTensorType.replicated, shard_dim:Optional[int] = 0):
+    def __new__(cls, elem: Union[torch.Tensor,List[torch.Tensor],Tuple[torch.Tensor]], func:Optional[Any] = None, dpt_type:DPTensorType = DPTensorType.replicated, batch_dim:Optional[int] = 0):
 
         if dpt_type == DPTensorType.replicated:
             assert isinstance(elem, torch.Tensor)
             with torch.no_grad():
                 dpt:List[torch.Tensor] = comm.broadcast(elem, devices=cls.device_ids)
-                for t in dpt:
-                    t.requires_grad = elem.requires_grad
 
         elif dpt_type == DPTensorType.distributed:
             #This can work on list or tuple of tensors
             assert (isinstance(elem, list) or isinstance(elem, tuple))
-
+            check_none = [True if e is None else False for e in elem]
+            if any(check_none):
+                return None
             requires_scatter:bool = False
             with torch.no_grad():
                 for t, d_id in zip(elem, cls.device_ids):
@@ -68,20 +68,17 @@ class DataParallelTensor(torch.Tensor):
                     stacked_t:torch.Tensor = torch.stack(elem, dim =0)
                     scattered_t: Tuple[torch.Tensor] = comm.scatter(stacked_t, devices = cls.device_ids, dim = 0)
                     dpt:List[torch.Tensor] = [torch.squeeze(t, dim = 0) for t in scattered_t]
-                    for t, e in zip(dpt, elem):
-                        t.requires_grad = e.requires_grad
                 else:
                     dpt:List[torch.Tensor] = elem
-        elif dpt_type == DPTensorType.sharded:
+        elif dpt_type == DPTensorType.distributed_batch:
             assert(isinstance(elem, torch.Tensor))
 
             with torch.no_grad():
-                scattered_t:Tuple[torch.Tensor] = comm.scatter(elem, devices = cls.device_ids, dim = shard_dim)
-                dpt:List[torch.Tensor] = list(scattered_t)
-                for t in dpt:
-                    t.requires_grad = elem.requires_grad    
+                scattered_t:Tuple[torch.Tensor] = comm.scatter(elem, devices = cls.device_ids, dim = batch_dim)
+                dpt:List[torch.Tensor] = list(scattered_t)  
 
-        meta_t:torch.Tensor = dpt[0]
+        meta_t:torch.Tensor = elem if dpt_type in (DPTensorType.replicated, DPTensorType.distributed_batch) else elem[0]
+        #NOTE: Chekc what needs to be done for distributes_batch case
         r = torch.Tensor._make_wrapper_subclass(
             cls,
             meta_t.size(),
@@ -126,8 +123,6 @@ class DataParallelTensor(torch.Tensor):
 
         for pos in range(len(cls.device_ids)):
             # import pdb
-            if (func == aten.convolution_backward.default):
-                pdb.set_trace()
             outs.append(
                 func(
                     *tree_map(unwrap_with_position(pos), args),
@@ -148,7 +143,7 @@ class DataParallelTensor(torch.Tensor):
         def out_wrap(e, func):
             elem_type = get_element_type(e)
             if elem_type is NoneType:
-                return torch.empty(()) #NOTE: Maybe should return a list of torch.empty()            
+                return None #NOTE: Maybe should return a list of torch.empty()            
             if elem_type == torch.Tensor:
                 return DataParallelTensor(outs, func, DPTensorType.distributed)
             elif elem_type == list:
@@ -160,9 +155,13 @@ class DataParallelTensor(torch.Tensor):
         return outs
 
 
+def data_parallel_parameters(mod:torch.nn.Module):
+    for p in mod.parameters():
+        p = DataParallelTensor(p, None, DPTensorType.replicated)
+
 print(_get_all_device_indices())
 test_tensor = torch.randn(32,3, 224, 224, device="cuda")
-dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.sharded)
+dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
 # res_tensor = dp_tensor.cos().cos().sum()
 # print(res_tensor)
 # res_tensor.backward()
@@ -172,11 +171,12 @@ import torchvision.models as models
 
 
 model = models.resnet18().cuda()
-
+data_parallel_parameters(model)
 out = model(dp_tensor)
 loss = out.sum()
 print(type(loss))
 print(loss.size())
 loss.backward()
-print(type(dp_tensor.grad))
-print(dp_tensor.grad.size())
+for p in model.parameters():
+    print(p.grad)
+    break
