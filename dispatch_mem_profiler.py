@@ -1,6 +1,6 @@
 from collections import defaultdict
 from typing import Dict
-
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,6 +44,7 @@ class MemoryProfileDispatchMode(TorchDispatchMode):
 
 
 def clear_state():
+    global mem_usage, operator_names
     operator_names.clear()
     mem_usage.clear()
 
@@ -57,7 +58,6 @@ def add_series(series_name):
 
 
 def save_graph(filename: str):
-    import matplotlib.pyplot as plt
 
     for series_name, mem_usage in series.items():
         y = mem_usage.values()
@@ -73,6 +73,9 @@ def save_graph(filename: str):
     plt.legend()
     print("Saving Graph")
     plt.savefig(filename)
+    global series, markers
+    series.clear()
+    markers.clear()
 
 
 def add_marker(marker_name):
@@ -125,33 +128,28 @@ if __name__ == "__main__":
             save_graph("autograd_mem_usage")
     except ImportError:
 
-        class MyModel(torch.nn.module):
+        class MyModel(torch.nn.Module):
             def __init__(self):
                 super(MyModel, self).__init__()
-                # 1 input image channel, 6 output channels, 5x5 square convolution
-                # kernel
-                self.conv1 = nn.Conv2d(1, 6, 5)
+
+                self.conv1 = nn.Conv2d(3, 6, 5)
+                self.pool = nn.MaxPool2d(2, 2)
                 self.conv2 = nn.Conv2d(6, 16, 5)
-                # an affine operation: y = Wx + b
-                self.fc1 = nn.Linear(16 * 5 * 5, 120)  # 5*5 from image dimension
+                self.fc1 = nn.Linear(16 * 5 * 5, 120)
                 self.fc2 = nn.Linear(120, 84)
                 self.fc3 = nn.Linear(84, 10)
 
             def forward(self, x):
-                # Max pooling over a (2, 2) window
-                x = F.max_pool2d(F.relu(self.conv1(x)), (2, 2))
-                # If the size is a square, you can specify with a single number
-                x = F.max_pool2d(F.relu(self.conv2(x)), 2)
-                x = torch.flatten(
-                    x, 1
-                )  # flatten all dimensions except the batch dimension
+                x = self.pool(F.relu(self.conv1(x)))
+                x = self.pool(F.relu(self.conv2(x)))
+                x = torch.flatten(x, 1) # flatten all dimensions except batch
                 x = F.relu(self.fc1(x))
                 x = F.relu(self.fc2(x))
                 x = self.fc3(x)
                 return x
 
         mod: torch.nn.Module = MyModel().cuda()
-        inp: torch.Tensor = torch.randn(32, 3, 224, 224, device="cuda")
+        inp: torch.Tensor = torch.randn(512, 3, 32, 32, device="cuda")
         mem_profile_model(mod, inp)
         add_series("eager_mode")
         save_graph("Model_mem_usage")
