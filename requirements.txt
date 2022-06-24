@@ -4,7 +4,3 @@ pytest
 numpy
 sympy
 expecttest
-functorch
-torchvision
-collections
-typing
