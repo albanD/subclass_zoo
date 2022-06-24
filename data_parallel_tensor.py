@@ -4,6 +4,7 @@ from torch.cuda import comm
 from torch.functional import Tensor
 import torch.nn as nn
 import pdb
+import weakref
 from torch.return_types import _fake_quantize_per_tensor_affine_cachemask_tensor_qparams
 from torch.utils._pytree import tree_map, tree_flatten
 from typing import Iterable, List, Any, Optional, Tuple, Iterable, Union
@@ -17,8 +18,13 @@ from torch._utils import (
     _get_devices_properties,
 )
 from enum import Enum, auto
+import torchvision.models as models
 
-
+# This dictionary stores the mapping from original leaf tensors to their transformed DPT counterparts. 
+# We will use this to perform an all reduce on the gradient field of DPT
+# Then populate the grad field of the original tensor
+leaf_tensors = defaultdict()
+# leaf_tensors = weakref.WeakValueDictionary()
 
 aten = torch.ops.aten
 
@@ -45,6 +51,7 @@ class DataParallelTensor(torch.Tensor):
 
     @staticmethod
     def __new__(cls, elem: Union[torch.Tensor,List[torch.Tensor],Tuple[torch.Tensor]], func:Optional[Any] = None, dpt_type:DPTensorType = DPTensorType.replicated, batch_dim:Optional[int] = 0):
+
 
         if dpt_type == DPTensorType.replicated:
             assert isinstance(elem, torch.Tensor)
@@ -78,7 +85,7 @@ class DataParallelTensor(torch.Tensor):
                 dpt:List[torch.Tensor] = list(scattered_t)  
 
         meta_t:torch.Tensor = elem if dpt_type in (DPTensorType.replicated, DPTensorType.distributed_batch) else elem[0]
-        #NOTE: Chekc what needs to be done for distributes_batch case
+        #NOTE: Check what needs to be done for distributes_batch case
         r = torch.Tensor._make_wrapper_subclass(
             cls,
             meta_t.size(),
@@ -90,7 +97,8 @@ class DataParallelTensor(torch.Tensor):
             requires_grad=meta_t.requires_grad,
         )
         r.elem = dpt
-
+        if (dpt_type == DPTensorType.replicated and meta_t.is_leaf):
+            leaf_tensors[meta_t] = r
         return r
 
     def __repr__(self):
@@ -153,22 +161,29 @@ class DataParallelTensor(torch.Tensor):
 
         outs = out_wrap(outs, func)
         return outs
+    
+    def all_reduce_grad(self, r_device:Optional[int]= torch.cuda.current_device()):
+        with torch.no_grad():
+            reduced_tensor: torch.Tensor = comm.reduce_add(self.elem,r_device)
+            b_tensor:List[torch.Tensor] = comm.broadcast(reduced_tensor, out=self.elem)
+            self.elem = b_tensor
+        return reduced_tensor
 
 
 def data_parallel_parameters(mod:torch.nn.Module):
+    param_count = 0
     for p in mod.parameters():
-        p = DataParallelTensor(p, None, DPTensorType.replicated)
+        param_count += 1
+        #p = DataParallelTensor(p, None, DPTensorType.replicated)
+    print("Param_count: ", param_count)
 
-print(_get_all_device_indices())
+print("Devices: ", _get_all_device_indices())
 test_tensor = torch.randn(32,3, 224, 224, device="cuda")
 dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
 # res_tensor = dp_tensor.cos().cos().sum()
 # print(res_tensor)
 # res_tensor.backward()
 # print(dp_tensor.grad)
-
-import torchvision.models as models
-
 
 model = models.resnet18().cuda()
 data_parallel_parameters(model)
@@ -177,6 +192,9 @@ loss = out.sum()
 print(type(loss))
 print(loss.size())
 loss.backward()
+
 for p in model.parameters():
-    print(p.grad)
-    break
+    print(type(p.grad))
+    print(type(p.grad.elem))
+    p.grad.all_reduce_grad(device('cuda'))
+
