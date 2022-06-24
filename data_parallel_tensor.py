@@ -20,11 +20,6 @@ from torch._utils import (
 from enum import Enum, auto
 import torchvision.models as models
 
-# This dictionary stores the mapping from original leaf tensors to their transformed DPT counterparts. 
-# We will use this to perform an all reduce on the gradient field of DPT
-# Then populate the grad field of the original tensor
-leaf_tensors = defaultdict()
-# leaf_tensors = weakref.WeakValueDictionary()
 
 aten = torch.ops.aten
 
@@ -97,8 +92,6 @@ class DataParallelTensor(torch.Tensor):
             requires_grad=meta_t.requires_grad,
         )
         r.elem = dpt
-        if (dpt_type == DPTensorType.replicated and meta_t.is_leaf):
-            leaf_tensors[meta_t] = r
         return r
 
     def __repr__(self):
@@ -170,23 +163,14 @@ class DataParallelTensor(torch.Tensor):
         return reduced_tensor
 
 
-def data_parallel_parameters(mod:torch.nn.Module):
-    param_count = 0
-    for p in mod.parameters():
-        param_count += 1
-        #p = DataParallelTensor(p, None, DPTensorType.replicated)
-    print("Param_count: ", param_count)
+
+
+
 
 print("Devices: ", _get_all_device_indices())
 test_tensor = torch.randn(32,3, 224, 224, device="cuda")
 dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
-# res_tensor = dp_tensor.cos().cos().sum()
-# print(res_tensor)
-# res_tensor.backward()
-# print(dp_tensor.grad)
-
 model = models.resnet18().cuda()
-data_parallel_parameters(model)
 out = model(dp_tensor)
 loss = out.sum()
 print(type(loss))
@@ -194,7 +178,13 @@ print(loss.size())
 loss.backward()
 
 for p in model.parameters():
-    print(type(p.grad))
-    print(type(p.grad.elem))
-    p.grad.all_reduce_grad(device('cuda'))
+    # print(type(p.data))
+    # print(type(p.grad))
+    # print(type(p.grad.elem))
+    p.grad = p.grad.all_reduce_grad(device('cuda'))
 
+# Non Model Example
+# res_tensor = dp_tensor.cos().cos().sum()
+# print(res_tensor)
+# res_tensor.backward()
+# print(dp_tensor.grad)
