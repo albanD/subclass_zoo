@@ -164,13 +164,16 @@ class DataParallelTensor(torch.Tensor):
 
 
 
-
-
-
 print("Devices: ", _get_all_device_indices())
 test_tensor = torch.randn(32,3, 224, 224, device="cuda")
 dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
 model = models.resnet18().cuda()
+import torch.nn.utils.stateless as stateless
+
+
+for p in model.parameters():
+    p= torch.nn.Parameter( DataParallelTensor(p.data, None, DPTensorType.distributed_batch))
+exit() 
 out = model(dp_tensor)
 loss = out.sum()
 print(type(loss))
