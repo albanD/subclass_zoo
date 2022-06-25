@@ -1,5 +1,6 @@
 from collections import defaultdict
 from typing import Dict
+
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
@@ -44,7 +45,6 @@ class MemoryProfileDispatchMode(TorchDispatchMode):
 
 
 def clear_state():
-    global mem_usage, operator_names
     operator_names.clear()
     mem_usage.clear()
 
@@ -58,7 +58,6 @@ def add_series(series_name):
 
 
 def save_graph(filename: str):
-
     for series_name, mem_usage in series.items():
         y = mem_usage.values()
         min_val = min(y)
@@ -73,9 +72,9 @@ def save_graph(filename: str):
     plt.legend()
     print("Saving Graph")
     plt.savefig(filename)
-    global series, markers
-    series.clear()
+    plt.close()
     markers.clear()
+    series.clear()
 
 
 def add_marker(marker_name):
@@ -102,13 +101,10 @@ def mem_profile_model(mod: torch.nn.Module, inp: torch.Tensor):
 if __name__ == "__main__":
     try:
         import torchvision.models as models
-
-        from functorch.compile import (
-            aot_module,
-            min_cut_rematerialization_partition,
-            nop,
-            print_compile,
-        )
+        from functorch.compile import aot_module
+        from functorch.compile import min_cut_rematerialization_partition
+        from functorch.compile import nop
+        from functorch.compile import print_compile
 
         mod: torch.nn.Module = models.resnet18().cuda()
         inp: torch.Tensor = torch.randn(32, 3, 224, 224, device="cuda")
@@ -142,7 +138,7 @@ if __name__ == "__main__":
             def forward(self, x):
                 x = self.pool(F.relu(self.conv1(x)))
                 x = self.pool(F.relu(self.conv2(x)))
-                x = torch.flatten(x, 1) # flatten all dimensions except batch
+                x = torch.flatten(x, 1)  # flatten all dimensions except batch
                 x = F.relu(self.fc1(x))
                 x = F.relu(self.fc2(x))
                 x = self.fc3(x)
