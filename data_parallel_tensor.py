@@ -22,7 +22,8 @@ from enum import Enum, auto
 import torchvision.models as models
 from functools import partial
 _ = torch.manual_seed(0)
-
+import sys
+sys.path.insert(0,'/scratch/sanketpurandare/work/functorch')
 torch.__future__.set_overwrite_module_params_on_conversion(True)
 
 aten = torch.ops.aten
@@ -69,7 +70,7 @@ class DataParallelTensor(torch.Tensor):
             check_not_tensor = [True if not isinstance(e, torch.Tensor) else False for e in elem]
             if any(check_not_tensor):
                 #NOTE: Need to define behaviour when an operation returns a tuple/list of vlaues that are not tensors
-                raise RuntimeWarning("Expected Tensor type in DataParallelTensor class Constructor")
+                # raise RuntimeWarning("Expected Tensor type in DataParallelTensor class Constructor")
                 return elem[0]
             requires_scatter:bool = False
             with torch.no_grad():
