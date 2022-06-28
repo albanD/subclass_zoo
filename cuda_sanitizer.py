@@ -9,6 +9,7 @@ def contains_tensor_types(type):
         contains_tensor_types(e) for e in type.containedTypes()
     )
 
+
 class CUDASanitizer(TorchDispatchMode):
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         if not kwargs:
@@ -54,11 +55,12 @@ class CUDASanitizer(TorchDispatchMode):
             stream = torch.cuda.current_stream(storage.device)
             return f"ptr {storage.data_ptr():#08x} on stream {stream.cuda_stream:#08x}"
 
-        readonly_str = ' '.join(map(render, inputs - outputs))
-        readwrite_str = ' '.join(map(render, outputs))
+        readonly_str = " ".join(map(render, inputs - outputs))
+        readwrite_str = " ".join(map(render, outputs))
 
         print(f"launch_kernel inputs {readonly_str} outputs {readwrite_str} # {schema}")
         return r
+
 
 with CUDASanitizer.push():
     s1 = torch.cuda.Stream()
