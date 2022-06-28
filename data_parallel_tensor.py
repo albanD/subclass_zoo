@@ -1,5 +1,6 @@
 import torch
 from torch._C import device, NoneType
+import torch.nn.functional as F
 from torch.cuda import comm
 from torch.functional import Tensor
 import torch.nn as nn
@@ -19,7 +20,10 @@ from torch._utils import (
 )
 from enum import Enum, auto
 import torchvision.models as models
+from functools import partial
+_ = torch.manual_seed(0)
 
+torch.__future__.set_overwrite_module_params_on_conversion(True)
 
 aten = torch.ops.aten
 
@@ -37,7 +41,7 @@ class DataParallelTensor(torch.Tensor):
     # 2) distributed: DPT can also be initialized by supplying a list/tuple of tensors
     #   if the elements rest on different devices, they will just be wrapped in DPT
     #   else the elements are scattered to different devices
-    # 3) sharded: This type of DPT tensor is created by sharding the input tensor across
+    # 3) distributed batch: This type of DPT tensor is created by sharding the input tensor across
     #   a specified sharding dimension (default: 0). Currently only equal chunk sizes are supported.
 
     elem: List[torch.Tensor]
@@ -50,18 +54,28 @@ class DataParallelTensor(torch.Tensor):
 
         if dpt_type == DPTensorType.replicated:
             assert isinstance(elem, torch.Tensor)
+            if(elem.device == device('meta')):
+                return elem
             with torch.no_grad():
                 dpt:List[torch.Tensor] = comm.broadcast(elem, devices=cls.device_ids)
 
         elif dpt_type == DPTensorType.distributed:
             #This can work on list or tuple of tensors
+            # breakpoint()
             assert (isinstance(elem, list) or isinstance(elem, tuple))
             check_none = [True if e is None else False for e in elem]
             if any(check_none):
                 return None
+            check_not_tensor = [True if not isinstance(e, torch.Tensor) else False for e in elem]
+            if any(check_not_tensor):
+                #NOTE: Need to define behaviour when an operation returns a tuple/list of vlaues that are not tensors
+                raise RuntimeWarning("Expected Tensor type in DataParallelTensor class Constructor")
+                return elem[0]
             requires_scatter:bool = False
             with torch.no_grad():
                 for t, d_id in zip(elem, cls.device_ids):
+                    if(t.device == device('meta')):
+                        return elem[0]
                     if t.device != device(d_id):
                         requires_scatter = True
                         break
@@ -102,7 +116,6 @@ class DataParallelTensor(torch.Tensor):
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         print(func)
-
         def wrap(e):
             if (isinstance(e, DataParallelTensor)):
                 return e
@@ -151,6 +164,12 @@ class DataParallelTensor(torch.Tensor):
                 return list(DataParallelTensor(list(t), func, DPTensorType.distributed) for t in zip(*e))
             elif elem_type == tuple:
                 return tuple(DataParallelTensor(list(t), func, DPTensorType.distributed) for t in zip(*e))
+            elif elem_type == bool:
+                return all(e)
+            else:
+                # NOTE: Think about handling this
+                print("Warning...")
+                return e[0]
 
         outs = out_wrap(outs, func)
         return outs
@@ -162,29 +181,74 @@ class DataParallelTensor(torch.Tensor):
             self.elem = b_tensor
         return reduced_tensor
 
-
+def make_data_parallel_module(mod: torch.nn.Module):
+    # This function converts the parameters of a model to DataParallelTensors
+    def wrapper(t):
+        if(isinstance(t, torch.nn.Parameter)):
+            return  DataParallelTensor(t.data, None, DPTensorType.replicated)
+    mod._apply(wrapper)
 
 print("Devices: ", _get_all_device_indices())
-test_tensor = torch.randn(32,3, 224, 224, device="cuda")
-dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
-model = models.resnet18().cuda()
-import torch.nn.utils.stateless as stateless
+D = 16
+dpt_x: torch.Tensor = torch.randn(D, device='cuda', requires_grad=True)
+dpt_x = DataParallelTensor(dpt_x, None, DPTensorType.replicated)
+def predict(weight, bias, x):
+    return F.linear(x, weight, bias).tanh()
+
+weight = torch.randn(D, D, device = 'cuda')
+bias = torch.randn(D, device = 'cuda')
 
 
-for p in model.parameters():
-    p= torch.nn.Parameter( DataParallelTensor(p.data, None, DPTensorType.distributed_batch))
-exit() 
-out = model(dp_tensor)
-loss = out.sum()
-print(type(loss))
-print(loss.size())
-loss.backward()
+unit_vectors = torch.eye(D).cuda()
 
-for p in model.parameters():
-    # print(type(p.data))
-    # print(type(p.grad))
-    # print(type(p.grad.elem))
-    p.grad = p.grad.all_reduce_grad(device('cuda'))
+
+
+# from functorch import vmap, vjp
+
+# _, vjp_fn = vjp(partial(predict, weight, bias), dpt_x)
+
+# ft_jacobian, = vmap(vjp_fn)(unit_vectors)
+# print(type(ft_jacobian))
+
+from functorch import jacrev, hessian, jacfwd
+
+# ft_jacobian = jacfwd(predict, argnums=2)(weight, bias, dpt_x)
+# # ft_jacobian2 = jacfwd(ft_jacobian, argnums=2)(weight, bias, dpt_x)
+# ft_jacobian2 = jacrev(predict, argnums=2)(weight, bias, dpt_x)
+# print(torch.allclose(ft_jacobian.elem[0], ft_jacobian2.elem[0]))
+
+# # print(ft_jacobian)
+
+hess_api = hessian(predict, argnums=2)(weight, bias, dpt_x)
+hess_fwdfwd = jacfwd(jacfwd(predict, argnums=2), argnums=2)(weight, bias, dpt_x)
+print(torch.allclose(hess_api, hess_fwdfwd))
+
+# def compute_jac(xp):
+#     jacobian_rows = [torch.autograd.grad(predict(weight, bias, xp), xp, vec)[0]
+#                      for vec in unit_vectors]
+#     return torch.stack(jacobian_rows)
+
+# jacobian = compute_jac(dpt_x)
+
+# print(jacobian.shape)
+# print(jacobian[0])
+
+# Example with a model
+# dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
+# model = models.resnet18().cuda()
+# make_data_parallel_module(model)
+# out = model(test_tensor)
+# loss = out.sum()
+# print(type(loss))
+# print(loss.size())
+# loss.backward()
+
+# for p in model.parameters():
+#     print(type(p.data))
+#     print(type(p.grad))
+#     print(type(p.grad.elem))
+#     p.grad.all_reduce_grad(device('cuda'))
+#     p = p - 0.5 * p.grad
 
 # Non Model Example
 # res_tensor = dp_tensor.cos().cos().sum()
