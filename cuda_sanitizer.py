@@ -25,6 +25,8 @@ class CUDASanitizer(TorchDispatchMode):
             if i < len(args):
                 argument = args[i]
             else:
+                if arg.name not in kwargs:
+                    continue
                 argument = kwargs[arg.name]
             if not contains_tensor_types(arg.type):
                 continue
@@ -50,12 +52,13 @@ class CUDASanitizer(TorchDispatchMode):
 
         def render(storage):
             stream = torch.cuda.current_stream(storage.device)
-            return f"ptr {storage.data_ptr} on stream {stream}"
+            return f"ptr {storage.data_ptr():#08x} on stream {stream.cuda_stream:#08x}"
 
         readonly_str = ' '.join(map(render, inputs - outputs))
         readwrite_str = ' '.join(map(render, outputs))
 
         print(f"launch_kernel inputs {readonly_str} outputs {readwrite_str} # {schema}")
+        return r
 
 with CUDASanitizer.push():
     s1 = torch.cuda.Stream()
