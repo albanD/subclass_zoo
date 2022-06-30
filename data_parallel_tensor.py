@@ -39,11 +39,13 @@ class DataParallelTensor(torch.Tensor):
     #   a specified sharding dimension (default: 0). Currently only equal chunk sizes are supported.
 
     elem: List[torch.Tensor]
-    device_ids: List[int] = _get_all_device_indices()
-    num_threads: int = len(device_ids)
-    threadpool: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(
-        max_workers=num_threads
-    )
+    
+    if(torch.cuda.is_available()):
+        device_ids: List[int] = _get_all_device_indices()
+        num_threads: int = len(device_ids)
+        threadpool: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(
+            max_workers=num_threads
+        )
     __slots__ = ["elem"]
 
     @staticmethod
@@ -108,7 +110,7 @@ class DataParallelTensor(torch.Tensor):
                 else:
                     dpt: List[torch.Tensor] = elem
         elif dpt_type == DPTensorType.distributed_batch:
-            #NOTE: This requires the batch dimension to be divisible by the number of devices.
+            # NOTE: This requires the batch dimension to be divisible by the number of devices.
             assert isinstance(elem, torch.Tensor)
 
             with torch.no_grad():
@@ -139,8 +141,6 @@ class DataParallelTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        print(func)
-
         def wrap(e):
             if isinstance(e, DataParallelTensor):
                 return e
@@ -210,8 +210,6 @@ class DataParallelTensor(torch.Tensor):
         return outs
 
     def all_reduce_grad(self, r_device: Optional[int] = torch.cuda.current_device()):
-        # The custom all reduce works as follows:
-        #
         with torch.no_grad():
             reduced_tensor: torch.Tensor = comm.reduce_add(self.elem, r_device)
             b_tensor: List[torch.Tensor] = comm.broadcast(reduced_tensor, out=self.elem)
@@ -233,7 +231,12 @@ def make_data_parallel_module(mod: torch.nn.Module):
 
 
 if __name__ == "__main__":
-    print("Devices: ", _get_all_device_indices())
+
+    if(torch.cuda.is_available()):
+        print("Devices: ", _get_all_device_indices())
+    else:
+        print("Need GPUs to run examples")
+        exit()
 
     try:
         from functools import partial
@@ -269,25 +272,55 @@ if __name__ == "__main__":
         )
         print(torch.allclose(hess_api, hess_fwdrev))
     except ImportError:
-        print("Requires Functorch Package for this example.")
+        print("Skipping functorch example, package missing.")
 
     try:
         # Example with a torchvision model
         import torchvision.models as models
 
-        test_tensor: torch.Tensor = torch.randn(16, 3, 224, 224, device="cuda")
+        test_tensor: torch.Tensor = torch.randn(2048, 3, 224, 224, device="cuda")
         dp_tensor = DataParallelTensor(
             test_tensor, None, DPTensorType.distributed_batch
         )
-        model = models.resnet18().cuda()
+        model = models.resnet50().cuda()
         make_data_parallel_module(model)
+        # Warmp up iteration
         out = model(dp_tensor)
         loss = out.sum()
         loss.backward()
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        for i in range(1):
+            out = model(dp_tensor)
+            loss = out.sum()
+            loss.backward()
+
+            for p in model.parameters():
+                p.grad.all_reduce_grad()
+                p = p - 0.5 * p.grad
+        end_event.record()
+        torch.cuda.synchronize()
+        print("Timing for 1 iteration (ms) DPT: ", start_event.elapsed_time(end_event))
+
+
+        test_tensor: torch.Tensor = torch.randn(256, 3, 224, 224, device="cuda")
+        model = models.resnet50().cuda()
+        # Warmp up iteration
+        out = model(test_tensor)
+        loss = out.sum()
+        loss.backward()
+        start_event.record()
+        for i in range(8):
+            out = model(test_tensor)
+            loss = out.sum()
+            loss.backward()
 
         for p in model.parameters():
-            p.grad.all_reduce_grad()
             p = p - 0.5 * p.grad
+        end_event.record()
+        torch.cuda.synchronize()
+        print("Timing for 8 iterations(ms): ", start_event.elapsed_time(end_event))
     except ImportError:
         print("Running custom model since torchvision package is absent.")
 
