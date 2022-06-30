@@ -14,6 +14,9 @@ import concurrent.futures as futures
 
 _ = torch.manual_seed(0)
 aten = torch.ops.aten
+NUM_DEVICES = 8
+PARALLEL_DISPATCH = False
+ALL_REDUCE = True
 
 
 class DPTensorType(Enum):
@@ -41,10 +44,12 @@ class DataParallelTensor(torch.Tensor):
     elem: List[torch.Tensor]
     
     if(torch.cuda.is_available()):
-        device_ids: List[int] = _get_all_device_indices()
-        num_threads: int = len(device_ids)
-        threadpool: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(
-            max_workers=num_threads
+        # device_ids: List[int] = _get_all_device_indices()
+        device_ids = [i for i in range(NUM_DEVICES)]
+        if(PARALLEL_DISPATCH):
+            num_threads: int = len(device_ids)
+            threadpool: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(
+                max_workers=num_threads
         )
     __slots__ = ["elem"]
 
@@ -161,17 +166,26 @@ class DataParallelTensor(torch.Tensor):
 
         # Call the function for each of the DPT elements by unwarpping them and corresponding args and kwargs,
         #  into element tensors so that the operation is performed on all the elements residing on the same device
-
-        future_res: List[futures.Future] = []
-        for pos in range(cls.num_threads):
-            future_res.append(
-                cls.threadpool.submit(
-                    func,
-                    *tree_map(unwrap_with_position(pos), args),
-                    **tree_map(unwrap_with_position(pos), kwargs),
+        if(PARALLEL_DISPATCH):
+            future_res: List[futures.Future] = []
+            for pos in range(cls.num_threads):
+                future_res.append(
+                    cls.threadpool.submit(
+                        func,
+                        *tree_map(unwrap_with_position(pos), args),
+                        **tree_map(unwrap_with_position(pos), kwargs),
+                    )
                 )
-            )
-        outs = [future_res[i].result() for i in range(cls.num_threads)]
+            outs = [future_res[i].result() for i in range(cls.num_threads)]
+        else:
+            outs = []
+            for pos in range(len(cls.device_ids)):
+                outs.append(
+                        func(
+                        *tree_map(unwrap_with_position(pos), args),
+                        **tree_map(unwrap_with_position(pos), kwargs)
+                        )
+                    )
 
         def get_element_type(lis):
             assert isinstance(lis, list)
@@ -233,7 +247,7 @@ def make_data_parallel_module(mod: torch.nn.Module):
 if __name__ == "__main__":
 
     if(torch.cuda.is_available()):
-        print("Devices: ", _get_all_device_indices())
+        print("Devices: ",[i for i in range(NUM_DEVICES)])
     else:
         print("Need GPUs to run examples")
         exit()
@@ -277,8 +291,8 @@ if __name__ == "__main__":
     try:
         # Example with a torchvision model
         import torchvision.models as models
-
-        test_tensor: torch.Tensor = torch.randn(2048, 3, 224, 224, device="cuda")
+        batch_size = 256
+        test_tensor: torch.Tensor = torch.randn(batch_size * NUM_DEVICES, 3, 224, 224, device="cuda")
         dp_tensor = DataParallelTensor(
             test_tensor, None, DPTensorType.distributed_batch
         )
@@ -295,32 +309,33 @@ if __name__ == "__main__":
             out = model(dp_tensor)
             loss = out.sum()
             loss.backward()
-
-            for p in model.parameters():
-                p.grad.all_reduce_grad()
-                p = p - 0.5 * p.grad
+            if(ALL_REDUCE):
+                for p in model.parameters():
+                    p.grad.all_reduce_grad()
+            #     p = p - 0.5 * p.grad
         end_event.record()
         torch.cuda.synchronize()
         print("Timing for 1 iteration (ms) DPT: ", start_event.elapsed_time(end_event))
 
 
-        test_tensor: torch.Tensor = torch.randn(256, 3, 224, 224, device="cuda")
+        test_tensor: torch.Tensor = torch.randn(batch_size, 3, 224, 224, device="cuda")
         model = models.resnet50().cuda()
         # Warmp up iteration
         out = model(test_tensor)
         loss = out.sum()
         loss.backward()
         start_event.record()
-        for i in range(8):
+        for i in range(NUM_DEVICES):
             out = model(test_tensor)
             loss = out.sum()
             loss.backward()
 
-        for p in model.parameters():
-            p = p - 0.5 * p.grad
+        # for p in model.parameters():
+        #     p = p - 0.5 * p.grad
+
         end_event.record()
         torch.cuda.synchronize()
-        print("Timing for 8 iterations(ms): ", start_event.elapsed_time(end_event))
+        print("Timing for "+ str(NUM_DEVICES) +" iterations(ms): ", start_event.elapsed_time(end_event))
     except ImportError:
         print("Running custom model since torchvision package is absent.")
 
@@ -358,13 +373,13 @@ if __name__ == "__main__":
             p = p - 0.5 * p.grad
 
     # Custom Function Example
-    test_tensor = torch.randn(8, 5, device="cuda", requires_grad=True)
-    dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
+    # test_tensor = torch.randn(8, 5, device="cuda", requires_grad=True)
+    # dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
 
-    def custom_func(x):
-        return x.cos().cos().sum()
+    # def custom_func(x):
+    #     return x.cos().cos().sum()
 
-    res_tensor = custom_func(dp_tensor)
-    print(res_tensor)
-    res_tensor.backward()
-    print(dp_tensor.grad)
+    # res_tensor = custom_func(dp_tensor)
+    # print(res_tensor)
+    # res_tensor.backward()
+    # print(dp_tensor.grad)
