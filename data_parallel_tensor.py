@@ -1,37 +1,30 @@
-import torch
-from torch._C import device, NoneType
-import torch.nn.functional as F
-from torch.cuda import comm
-from torch.functional import Tensor
-import torch.nn as nn
-import pdb
-import weakref
-from torch.return_types import _fake_quantize_per_tensor_affine_cachemask_tensor_qparams
-from torch.utils._pytree import tree_map, tree_flatten
-from typing import Iterable, List, Any, Optional, Tuple, Iterable, Union
-from numbers import Number
-from collections import defaultdict
-from torch.utils._python_dispatch import push_torch_dispatch_mode, TorchDispatchMode
-from torch._utils import (
-    _get_all_device_indices,
-    _get_available_device_type,
-    _get_device_index,
-    _get_devices_properties,
-)
 from enum import Enum, auto
-import torchvision.models as models
-from functools import partial
-_ = torch.manual_seed(0)
-import sys
-sys.path.insert(0,'/scratch/sanketpurandare/work/functorch')
-torch.__future__.set_overwrite_module_params_on_conversion(True)
+from typing import Any, List, Optional, Tuple, Union
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch._C import NoneType, device
+from torch._utils import _get_all_device_indices
+from torch.cuda import comm
+from torch.utils._pytree import tree_map
+
+torch.__future__.set_overwrite_module_params_on_conversion(True)
+import concurrent.futures as futures
+
+_ = torch.manual_seed(0)
 aten = torch.ops.aten
 
+
 class DPTensorType(Enum):
-    replicated = auto() #This tensor will be replicated across all the devices
-    distributed_batch = auto() #This tensor will be sharded along the first/batch dimension across the devices, NOTE: only equal chunk sizes are supported
-    distributed = auto() # This is a list of tensors, each of which rests on different devices
+    replicated = auto()  # This tensor will be replicated across all the devices
+    distributed_batch = (
+        auto()
+    )  # This tensor will be sharded along the first/batch dimension across
+    # the devices, NOTE: only equal chunk sizes are supported
+    distributed = (
+        auto()
+    )  # This is a list of tensors, each of which rests on different devices
 
 
 class DataParallelTensor(torch.Tensor):
@@ -47,62 +40,91 @@ class DataParallelTensor(torch.Tensor):
 
     elem: List[torch.Tensor]
     device_ids: List[int] = _get_all_device_indices()
+    num_threads: int = len(device_ids)
+    threadpool: futures.ThreadPoolExecutor = futures.ThreadPoolExecutor(
+        max_workers=num_threads
+    )
     __slots__ = ["elem"]
 
     @staticmethod
-    def __new__(cls, elem: Union[torch.Tensor,List[torch.Tensor],Tuple[torch.Tensor]], func:Optional[Any] = None, dpt_type:DPTensorType = DPTensorType.replicated, batch_dim:Optional[int] = 0):
-
+    def __new__(
+        cls,
+        elem: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]],
+        func: Optional[Any] = None,
+        dpt_type: DPTensorType = DPTensorType.replicated,
+        batch_dim: Optional[int] = 0,
+    ):
 
         if dpt_type == DPTensorType.replicated:
+            # NOTE: If the input is None, we return None
+            if elem is None:
+                return None
             assert isinstance(elem, torch.Tensor)
-            if(elem.device == device('meta')):
+            # NOTE: For handling meta tensors, if the device of an input tensor is meta,
+            # we just return the first element in such a list/tuple
+            if elem.device == device("meta"):
                 return elem
+
             with torch.no_grad():
-                dpt:List[torch.Tensor] = comm.broadcast(elem, devices=cls.device_ids)
+                dpt: List[torch.Tensor] = comm.broadcast(elem, devices=cls.device_ids)
 
         elif dpt_type == DPTensorType.distributed:
-            #This can work on list or tuple of tensors
-            # breakpoint()
-            assert (isinstance(elem, list) or isinstance(elem, tuple))
+            assert isinstance(elem, list) or isinstance(elem, tuple)
+            # NOTE: For handling None values, if any element of a list/tuple is None, we return None
             check_none = [True if e is None else False for e in elem]
             if any(check_none):
                 return None
-            check_not_tensor = [True if not isinstance(e, torch.Tensor) else False for e in elem]
+            check_not_tensor = [
+                True if not isinstance(e, torch.Tensor) else False for e in elem
+            ]
             if any(check_not_tensor):
-                #NOTE: Need to define behaviour when an operation returns a tuple/list of vlaues that are not tensors
-                # raise RuntimeWarning("Expected Tensor type in DataParallelTensor class Constructor")
+                # NOTE: Need to define behaviour when an operation returns a tuple/list of vlaues that are not tensors
+                # Currently we just return the first elemt of such a list/tuple
                 return elem[0]
-            requires_scatter:bool = False
+            requires_scatter: bool = False
             with torch.no_grad():
                 for t, d_id in zip(elem, cls.device_ids):
-                    if(t.device == device('meta')):
+                    if t.device == device("meta"):
+                        # NOTE: For handling meta tensors, if the device of any tensor in such a list/tuple is meta,
+                        # we just return the first element in such a list/tuple
                         return elem[0]
                     if t.device != device(d_id):
                         requires_scatter = True
                         break
 
-                if(requires_scatter):
-                    stacked_t:torch.Tensor = torch.stack(elem, dim =0)
-                    scattered_t: Tuple[torch.Tensor] = comm.scatter(stacked_t, devices = cls.device_ids, dim = 0)
-                    dpt:List[torch.Tensor] = [torch.squeeze(t, dim = 0) for t in scattered_t]
+                if requires_scatter:
+                    # We first stack all the tensors in the list/tuple along dimension 0, to get a single tensor
+                    # We then scatter the tensor along the 0th dimension to different devices
+                    # The scatter function returns a list of tensors with a redundant 0th dimension for each element
+                    # We squeeze out the redundant dimension from each of these elements to finally get a list of tensors
+                    # each residing on a list of devices
+                    stacked_t: torch.Tensor = torch.stack(elem, dim=0)
+                    scattered_t: Tuple[torch.Tensor] = comm.scatter(
+                        stacked_t, devices=cls.device_ids, dim=0
+                    )
+                    dpt: List[torch.Tensor] = [
+                        torch.squeeze(t, dim=0) for t in scattered_t
+                    ]
                 else:
-                    dpt:List[torch.Tensor] = elem
+                    dpt: List[torch.Tensor] = elem
         elif dpt_type == DPTensorType.distributed_batch:
-            assert(isinstance(elem, torch.Tensor))
+            assert isinstance(elem, torch.Tensor)
 
             with torch.no_grad():
-                scattered_t:Tuple[torch.Tensor] = comm.scatter(elem, devices = cls.device_ids, dim = batch_dim)
-                dpt:List[torch.Tensor] = list(scattered_t)  
+                scattered_t: Tuple[torch.Tensor] = comm.scatter(
+                    elem, devices=cls.device_ids, dim=batch_dim
+                )
+                dpt: List[torch.Tensor] = list(scattered_t)
 
-        meta_t:torch.Tensor = elem if dpt_type in (DPTensorType.replicated, DPTensorType.distributed_batch) else elem[0]
-        #NOTE: Check what needs to be done for distributes_batch case
+        meta_t: torch.Tensor = elem if dpt_type == DPTensorType.replicated else dpt[0]
+
         r = torch.Tensor._make_wrapper_subclass(
             cls,
             meta_t.size(),
             strides=meta_t.stride(),
             storage_offset=meta_t.storage_offset(),
-            device=meta_t.device, #This is the device of of either input tensor or first tensor of a list
-            dtype=meta_t.dtype, 
+            device=meta_t.device,  # This is the device of of either input tensor or first tensor of a list
+            dtype=meta_t.dtype,
             layout=meta_t.layout,
             requires_grad=meta_t.requires_grad,
         )
@@ -117,13 +139,15 @@ class DataParallelTensor(torch.Tensor):
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
         print(func)
+
         def wrap(e):
-            if (isinstance(e, DataParallelTensor)):
+            if isinstance(e, DataParallelTensor):
                 return e
-            elif(isinstance(e, torch.Tensor)):
+            elif isinstance(e, torch.Tensor):
                 return DataParallelTensor(e, func, DPTensorType.replicated)
             else:
                 return e
+
         # All the args and kwargs are checked and any leaf tensors are wrapped as replicated DPTs
         args = tree_map(wrap, args)
         kwargs = tree_map(wrap, kwargs)
@@ -133,38 +157,47 @@ class DataParallelTensor(torch.Tensor):
                 return e.elem[pos] if isinstance(e, DataParallelTensor) else e
 
             return get_element
-        # Call the function for each of the DPT elements by unwarpping them and corresponding args and kwargs into tensors
-        outs = []
 
-        for pos in range(len(cls.device_ids)):
-            # import pdb
-            outs.append(
-                func(
+        # Call the function for each of the DPT elements by unwarpping them and corresponding args and kwargs,
+        #  into element tensors so that the operation is performed on all the elements residing on the same device
+
+        future_res: List[futures.Future] = []
+        for pos in range(cls.num_threads):
+            future_res.append(
+                cls.threadpool.submit(
+                    func,
                     *tree_map(unwrap_with_position(pos), args),
                     **tree_map(unwrap_with_position(pos), kwargs),
                 )
             )
+        outs = [future_res[i].result() for i in range(cls.num_threads)]
 
         def get_element_type(lis):
             assert isinstance(lis, list)
             return type(lis[0])
 
         # The ouput will always be a list
-        # The list can contain tensors, list of tensors or tuples of tensors
+        # The list can contain tensors, bools, list of tensors or tuples of tensors or None
         # In case of tensors we just wrap them in DPT
-        # In case of list/tuple of tensors, the corresponding elemsnts across list/tuple are warpped
+        # In case of list/tuple of tensors, the corresponding elements across list/tuple are warpped
         #  into a DPT and a list/tuple is returned respectively
 
         def out_wrap(e, func):
             elem_type = get_element_type(e)
             if elem_type is NoneType:
-                return None #NOTE: Maybe should return a list of torch.empty()            
+                return None
             if elem_type == torch.Tensor:
                 return DataParallelTensor(outs, func, DPTensorType.distributed)
             elif elem_type == list:
-                return list(DataParallelTensor(list(t), func, DPTensorType.distributed) for t in zip(*e))
+                return list(
+                    DataParallelTensor(list(t), func, DPTensorType.distributed)
+                    for t in zip(*e)
+                )
             elif elem_type == tuple:
-                return tuple(DataParallelTensor(list(t), func, DPTensorType.distributed) for t in zip(*e))
+                return tuple(
+                    DataParallelTensor(list(t), func, DPTensorType.distributed)
+                    for t in zip(*e)
+                )
             elif elem_type == bool:
                 return all(e)
             else:
@@ -174,85 +207,130 @@ class DataParallelTensor(torch.Tensor):
 
         outs = out_wrap(outs, func)
         return outs
-    
-    def all_reduce_grad(self, r_device:Optional[int]= torch.cuda.current_device()):
+
+    def all_reduce_grad(self, r_device: Optional[int] = torch.cuda.current_device()):
+        # The custom all reduce works as follows:
+        #
         with torch.no_grad():
-            reduced_tensor: torch.Tensor = comm.reduce_add(self.elem,r_device)
-            b_tensor:List[torch.Tensor] = comm.broadcast(reduced_tensor, out=self.elem)
+            reduced_tensor: torch.Tensor = comm.reduce_add(self.elem, r_device)
+            b_tensor: List[torch.Tensor] = comm.broadcast(reduced_tensor, out=self.elem)
             self.elem = b_tensor
         return reduced_tensor
 
+
 def make_data_parallel_module(mod: torch.nn.Module):
-    # This function converts the parameters of a model to DataParallelTensors
+    # This function converts the parameters of a nn.Module to replicated DataParallelTensors
+    # the else part is important for buffers of the module
     def wrapper(t):
-        if(isinstance(t, torch.nn.Parameter)):
-            return  DataParallelTensor(t.data, None, DPTensorType.replicated)
+        if isinstance(t, torch.nn.Parameter):
+            return DataParallelTensor(t.data, None, DPTensorType.replicated)
+        else:
+            assert type(t) in (torch.Tensor, NoneType, bool)
+            return DataParallelTensor(t, None, DPTensorType.replicated)
+
     mod._apply(wrapper)
 
-print("Devices: ", _get_all_device_indices())
-D = 16
-dpt_x: torch.Tensor = torch.randn(D, device='cuda', requires_grad=True)
-dpt_x = DataParallelTensor(dpt_x, None, DPTensorType.replicated)
-def predict(weight, bias, x):
-    return F.linear(x, weight, bias).tanh()
 
-weight = torch.randn(D, D, device = 'cuda')
-bias = torch.randn(D, device = 'cuda')
+if __name__ == "__main__":
+    print("Devices: ", _get_all_device_indices())
 
+    try:
+        from functools import partial
+        from functorch import hessian, jacfwd, jacrev, vjp, vmap
 
-unit_vectors = torch.eye(D).cuda()
+        D = 16
+        x: torch.Tensor = torch.randn(D, device="cuda")
+        dpt_x = DataParallelTensor(x, None, DPTensorType.replicated)
 
+        def predict(weight, bias, x):
+            return F.linear(x, weight, bias).tanh()
 
+        weight = torch.randn(D, D, device="cuda")
+        bias = torch.randn(D, device="cuda")
 
-# from functorch import vmap, vjp
+        # Computing Jacobian using vmap and vjp and jacrev
+        clone_x = dpt_x.clone().requires_grad_()
+        unit_vectors = torch.eye(D).cuda()
 
-# _, vjp_fn = vjp(partial(predict, weight, bias), dpt_x)
+        _, vjp_fn = vjp(partial(predict, weight, bias), clone_x)
+        (ft_jacobian,) = vmap(vjp_fn)(unit_vectors)
 
-# ft_jacobian, = vmap(vjp_fn)(unit_vectors)
-# print(type(ft_jacobian))
+        clone_x = dpt_x.clone().requires_grad_()
+        jacobian_rev = jacrev(predict, argnums=2)(weight, bias, clone_x)
 
-from functorch import jacrev, hessian, jacfwd
+        print(torch.allclose(ft_jacobian, jacobian_rev))
 
-# ft_jacobian = jacfwd(predict, argnums=2)(weight, bias, dpt_x)
-# # ft_jacobian2 = jacfwd(ft_jacobian, argnums=2)(weight, bias, dpt_x)
-# ft_jacobian2 = jacrev(predict, argnums=2)(weight, bias, dpt_x)
-# print(torch.allclose(ft_jacobian.elem[0], ft_jacobian2.elem[0]))
+        # Computing Hessian using composition of jacrev and jacfwd vs hessian api
+        clone_x = dpt_x.clone().requires_grad_()
+        hess_api = hessian(predict, argnums=2)(weight, bias, clone_x)
+        hess_fwdrev = jacfwd(jacrev(predict, argnums=2), argnums=2)(
+            weight, bias, clone_x
+        )
+        print(torch.allclose(hess_api, hess_fwdrev))
+    except ImportError:
+        print("Requires Functorch Package for this example.")
 
-# # print(ft_jacobian)
+    try:
+        # Example with a torchvision model
+        import torchvision.models as models
 
-hess_api = hessian(predict, argnums=2)(weight, bias, dpt_x)
-hess_fwdfwd = jacfwd(jacfwd(predict, argnums=2), argnums=2)(weight, bias, dpt_x)
-print(torch.allclose(hess_api, hess_fwdfwd))
+        test_tensor: torch.Tensor = torch.randn(16, 3, 224, 224, device="cuda")
+        dp_tensor = DataParallelTensor(
+            test_tensor, None, DPTensorType.distributed_batch
+        )
+        model = models.resnet18().cuda()
+        make_data_parallel_module(model)
+        out = model(dp_tensor)
+        loss = out.sum()
+        loss.backward()
 
-# def compute_jac(xp):
-#     jacobian_rows = [torch.autograd.grad(predict(weight, bias, xp), xp, vec)[0]
-#                      for vec in unit_vectors]
-#     return torch.stack(jacobian_rows)
+        for p in model.parameters():
+            p.grad.all_reduce_grad()
+            p = p - 0.5 * p.grad
+    except ImportError:
+        print("Running custom model since torchvision package is absent.")
 
-# jacobian = compute_jac(dpt_x)
+        # Custom Model Example
+        class MyModel(torch.nn.Module):
+            def __init__(self):
+                super(MyModel, self).__init__()
 
-# print(jacobian.shape)
-# print(jacobian[0])
+                self.conv1 = nn.Conv2d(3, 6, 5)
+                self.pool = nn.MaxPool2d(2, 2)
+                self.conv2 = nn.Conv2d(6, 16, 5)
+                self.fc1 = nn.Linear(16 * 5 * 5, 120)
+                self.fc2 = nn.Linear(120, 84)
+                self.fc3 = nn.Linear(84, 10)
 
-# Example with a model
-# dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
-# model = models.resnet18().cuda()
-# make_data_parallel_module(model)
-# out = model(test_tensor)
-# loss = out.sum()
-# print(type(loss))
-# print(loss.size())
-# loss.backward()
+            def forward(self, x):
+                x = self.pool(F.relu(self.conv1(x)))
+                x = self.pool(F.relu(self.conv2(x)))
+                x = torch.flatten(x, 1)  # flatten all dimensions except batch
+                x = F.relu(self.fc1(x))
+                x = F.relu(self.fc2(x))
+                x = self.fc3(x)
+                return x
 
-# for p in model.parameters():
-#     print(type(p.data))
-#     print(type(p.grad))
-#     print(type(p.grad.elem))
-#     p.grad.all_reduce_grad(device('cuda'))
-#     p = p - 0.5 * p.grad
+        mod: torch.nn.Module = MyModel().cuda()
+        inp: torch.Tensor = torch.randn(512, 3, 32, 32, device="cuda")
+        dpt_inp = DataParallelTensor(inp, None, DPTensorType.distributed_batch)
+        make_data_parallel_module(mod)
+        out = mod(dpt_inp)
+        loss = out.sum()
+        loss.backward()
 
-# Non Model Example
-# res_tensor = dp_tensor.cos().cos().sum()
-# print(res_tensor)
-# res_tensor.backward()
-# print(dp_tensor.grad)
+        for p in mod.parameters():
+            p.grad.all_reduce_grad()
+            p = p - 0.5 * p.grad
+
+    # Custom Function Example
+    test_tensor = torch.randn(8, 5, device="cuda", requires_grad=True)
+    dp_tensor = DataParallelTensor(test_tensor, None, DPTensorType.distributed_batch)
+
+    def custom_func(x):
+        return x.cos().cos().sum()
+
+    res_tensor = custom_func(dp_tensor)
+    print(res_tensor)
+    res_tensor.backward()
+    print(dp_tensor.grad)
