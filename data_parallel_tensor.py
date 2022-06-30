@@ -108,6 +108,7 @@ class DataParallelTensor(torch.Tensor):
                 else:
                     dpt: List[torch.Tensor] = elem
         elif dpt_type == DPTensorType.distributed_batch:
+            #NOTE: This requires the batch dimension to be divisible by the number of devices.
             assert isinstance(elem, torch.Tensor)
 
             with torch.no_grad():
