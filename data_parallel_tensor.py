@@ -209,7 +209,7 @@ class DataParallelTensor(torch.Tensor):
         outs = out_wrap(outs, func)
         return outs
 
-    def all_reduce_grad(self, r_device: Optional[int] = torch.cuda.current_device()):
+    def all_reduce_grad(self, r_device: Optional[int] = torch.cuda.current_device() if torch.cuda.is_available() else 0):
         with torch.no_grad():
             reduced_tensor: torch.Tensor = comm.reduce_add(self.elem, r_device)
             b_tensor: List[torch.Tensor] = comm.broadcast(reduced_tensor, out=self.elem)
