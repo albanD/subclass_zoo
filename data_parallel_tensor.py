@@ -9,10 +9,13 @@ from torch._utils import _get_all_device_indices
 from torch.cuda import comm
 from torch.utils._pytree import tree_map
 
+# NOTE: We need to set this because when we lift the module parameters to DataParallelTensors (DPT) using mod._apply,
+# we not not want to do an in place copy of the new parameter value, we want to overwrite it.
+# The DPT is a list of tensors and hence an in-place copy between the old and new values of the parameter are incompatible.
 torch.__future__.set_overwrite_module_params_on_conversion(True)
 import concurrent.futures as futures
 
-_ = torch.manual_seed(0)
+torch.manual_seed(0)
 aten = torch.ops.aten
 NUM_DEVICES = 8
 PARALLEL_DISPATCH = False
@@ -20,14 +23,13 @@ ALL_REDUCE = True
 
 
 class DPTensorType(Enum):
-    replicated = auto()  # This tensor will be replicated across all the devices
-    distributed_batch = (
-        auto()
-    )  # This tensor will be sharded along the first/batch dimension across
+    # This tensor will be replicated across all the devices
+    replicated = auto()
+    # This tensor will be sharded along the first/batch dimension across
     # the devices, NOTE: only equal chunk sizes are supported
-    distributed = (
-        auto()
-    )  # This is a list of tensors, each of which rests on different devices
+    distributed_batch = auto()
+    # This is a list of tensors, each of which rests on different devices
+    distributed = auto()
 
 
 class DataParallelTensor(torch.Tensor):
@@ -73,47 +75,60 @@ class DataParallelTensor(torch.Tensor):
                 return elem
 
             with torch.no_grad():
-                dpt: List[torch.Tensor] = comm.broadcast(elem, devices=cls.device_ids)
+                dp_tensor: List[torch.Tensor] = comm.broadcast(
+                    elem, devices=cls.device_ids
+                )
 
         elif dpt_type == DPTensorType.distributed:
             assert isinstance(elem, list) or isinstance(elem, tuple)
-            # NOTE: For handling None values, if any element of a list/tuple is None, we return None
-            check_none = [True if e is None else False for e in elem]
-            if any(check_none):
-                return None
-            check_not_tensor = [
-                True if not isinstance(e, torch.Tensor) else False for e in elem
-            ]
-            if any(check_not_tensor):
-                # NOTE: Need to define behaviour when an operation returns a tuple/list of vlaues that are not tensors
-                # Currently we just return the first elemt of such a list/tuple
-                return elem[0]
-            requires_scatter: bool = False
-            with torch.no_grad():
-                for t, d_id in zip(elem, cls.device_ids):
-                    if t.device == device("meta"):
-                        # NOTE: For handling meta tensors, if the device of any tensor in such a list/tuple is meta,
-                        # we just return the first element in such a list/tuple
-                        return elem[0]
-                    if t.device != device(d_id):
-                        requires_scatter = True
-                        break
+            # We check if the first elemnt of the list/tuple is a tensor
+            if isinstance(elem[0], torch.Tensor):
+                # Make a check to see if all elements are of type tensor
+                assert all(isinstance(e, torch.Tensor) for e in elem)
+                requires_scatter: bool = False
+                with torch.no_grad():
+                    for t, d_id in zip(elem, cls.device_ids):
+                        if t.device == device("meta"):
+                            # NOTE: For handling meta tensors, if the device of any tensor in such a list/tuple is meta,
+                            # we just return the first element in such a list/tuple. This usually happens for factory functions,
+                            # like torch.ones or torch.zeros generated either during forward or backward mode autodiff.
+                            # we cannot check the equality of elemts in here since they do not exist physically
+                            # we just check that all of them should be meta tensors
+                            if all(e.device == torch.device("meta") for e in elem):
+                                return elem[0]
+                            else:
+                                raise TypeError(
+                                    f"Device error in {func}: Not all tensors are meta."
+                                )
+                        if t.device != device(d_id):
+                            requires_scatter = True
+                            break
 
-                if requires_scatter:
-                    # We first stack all the tensors in the list/tuple along dimension 0, to get a single tensor
-                    # We then scatter the tensor along the 0th dimension to different devices
-                    # The scatter function returns a list of tensors with a redundant 0th dimension for each element
-                    # We squeeze out the redundant dimension from each of these elements to finally get a list of tensors
-                    # each residing on a list of devices
-                    stacked_t: torch.Tensor = torch.stack(elem, dim=0)
-                    scattered_t: Tuple[torch.Tensor] = comm.scatter(
-                        stacked_t, devices=cls.device_ids, dim=0
-                    )
-                    dpt: List[torch.Tensor] = [
-                        torch.squeeze(t, dim=0) for t in scattered_t
-                    ]
+                    if requires_scatter:
+                        # We first stack all the tensors in the list/tuple along dimension 0, to get a single tensor
+                        # We then scatter the tensor along the 0th dimension to different devices
+                        # The scatter function returns a list of tensors with a redundant 0th dimension for each element
+                        # We squeeze out the redundant dimension from each of these elements to finally get a list of tensors
+                        # each residing on a list of devices
+                        stacked_t: torch.Tensor = torch.stack(elem, dim=0)
+                        scattered_t: Tuple[torch.Tensor] = comm.scatter(
+                            stacked_t, devices=cls.device_ids, dim=0
+                        )
+                        dp_tensor: List[torch.Tensor] = [
+                            torch.squeeze(t, dim=0) for t in scattered_t
+                        ]
+                    else:
+                        dp_tensor: List[torch.Tensor] = elem
+            else:
+                # Elements of the list/tuple are non-tensors.
+                # NOTE: If the list contains non-tensor types then we return a single value only if all of them have identical value.
+                if all(v == elem[0] for v in elem):
+                    return elem[0]
                 else:
-                    dpt: List[torch.Tensor] = elem
+                    raise ValueError(
+                        f"Operation {func} retuns non-identical non-tensor values for some elemnts of DPT"
+                    )
+
         elif dpt_type == DPTensorType.distributed_batch:
             # NOTE: This requires the batch dimension to be divisible by the number of devices.
             assert isinstance(elem, torch.Tensor)
@@ -122,9 +137,11 @@ class DataParallelTensor(torch.Tensor):
                 scattered_t: Tuple[torch.Tensor] = comm.scatter(
                     elem, devices=cls.device_ids, dim=batch_dim
                 )
-                dpt: List[torch.Tensor] = list(scattered_t)
+                dp_tensor: List[torch.Tensor] = list(scattered_t)
 
-        meta_t: torch.Tensor = elem if dpt_type == DPTensorType.replicated else dpt[0]
+        meta_t: torch.Tensor = (
+            elem if dpt_type == DPTensorType.replicated else dp_tensor[0]
+        )
 
         r = torch.Tensor._make_wrapper_subclass(
             cls,
@@ -136,7 +153,7 @@ class DataParallelTensor(torch.Tensor):
             layout=meta_t.layout,
             requires_grad=meta_t.requires_grad,
         )
-        r.elem = dpt
+        r.elem = dp_tensor
         return r
 
     def __repr__(self):
@@ -187,38 +204,36 @@ class DataParallelTensor(torch.Tensor):
                     )
                 )
 
-        def get_element_type(lis):
-            assert isinstance(lis, list)
-            return type(lis[0])
-
-        # The ouput will always be a list
+        # The ouput will always be a list since we are creating it
         # The list can contain tensors, bools, list of tensors or tuples of tensors or None
         # In case of tensors we just wrap them in DPT
         # In case of list/tuple of tensors, the corresponding elements across list/tuple are warpped
         #  into a DPT and a list/tuple is returned respectively
 
         def out_wrap(e, func):
-            elem_type = get_element_type(e)
-            if elem_type is NoneType:
-                return None
-            if elem_type == torch.Tensor:
+
+            assert isinstance(e, list)
+
+            if isinstance(e[0], torch.Tensor):
                 return DataParallelTensor(outs, func, DPTensorType.distributed)
-            elif elem_type == list:
+            elif isinstance(e[0], list):
                 return list(
                     DataParallelTensor(list(t), func, DPTensorType.distributed)
                     for t in zip(*e)
                 )
-            elif elem_type == tuple:
+            elif isinstance(e[0], tuple):
                 return tuple(
                     DataParallelTensor(list(t), func, DPTensorType.distributed)
                     for t in zip(*e)
                 )
-            elif elem_type == bool:
-                return all(e)
             else:
-                # NOTE: Think about handling this
-                print("Warning...")
-                return e[0]
+                # NOTE: If the list contains non-tensor types then we return a single value only if all of them have identical value.
+                if all(v == e[0] for v in e):
+                    return e[0]
+                else:
+                    raise ValueError(
+                        f"Operation {func} retuns non-identical non-tensor values for some elemnts of DPT"
+                    )
 
         outs = out_wrap(outs, func)
         return outs
@@ -254,7 +269,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         print("Devices: ", [i for i in range(NUM_DEVICES)])
     else:
-        print("Need GPUs to run examples")
+        print("GPU not found. Need GPUs to run examples. Exiting...")
         exit()
 
     try:
