@@ -47,6 +47,7 @@ TODO
 - Custom allocator mode (albanD)
 - Lazy tensor
 - Immutable tensor
+- Various ways of writing FX passes https://gist.github.com/1c640ea30fd7451b08e90e34461459c1
 
 ## Work plan
 
