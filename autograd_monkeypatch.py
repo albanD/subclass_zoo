@@ -22,4 +22,4 @@ class AutogradMonkeypatch(TorchFunctionMode):
         return func(*args, **kwargs)
 
 with AutogradMonkeypatch():
-    print(torch.nn.functional.dropout(torch.randn(4)))
+    torch.nn.functional.dropout(torch.randn(4, requires_grad=True)).sum().backward()
