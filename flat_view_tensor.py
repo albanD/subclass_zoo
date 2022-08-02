@@ -5,9 +5,15 @@ from torch.nn import Parameter
 from typing import List
 
 # TODO: support tensor methods
-class IndirectTensor:
-    def __init__(self, indir):
+class IndirectParameter(torch.Tensor):
+    def __new__(cls, indir, grad_indir):
+        elem = indir()
+        return cls._make_subclass(cls, elem, True)
+
+    def __init__(self, indir, grad_indir):
         self.indir = indir
+        self.grad_indir = grad_indir
+        self._is_param = True
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
@@ -17,15 +23,18 @@ class IndirectTensor:
         # TODO: you could imagine some sort of caching mechanism, but
         # then you'd also need to design an invalidation mechanism
         def resolve_indir(t):
-            if isinstance(t, IndirectTensor):
+            if isinstance(t, IndirectParameter):
                 return t.indir()
             else:
                 return t
 
         return func(*tree_map(resolve_indir, args), **tree_map(resolve_indir, kwargs))
 
-    # TODO: need to handle grad
-    # TODO: need to handle serialization
+    @property
+    def grad(self):
+        return self.grad_indir()
+
+    # TODO: need to handle checkpointing(?)
 
 
 # model:
@@ -42,16 +51,25 @@ class FlattenParamsWrapper(nn.Module):
         # find where the parameters live in the modules, install default
         # mapping
         shared_param_memo = {}
-        self._indirections = {}
+        self._underlying = {}
+        self._transform = {}
         for submodule_name, submodule in module.named_modules():
             for param_name, param in submodule.named_parameters(recurse=False):
                 assert param not in shared_param_memo, "NYI"
                 shared_param_memo[param] = (submodule, submodule_name, param_name)
-                # gotta allocate fresh environments for the closures
-                self._indirections[(submodule_name, param_name)] = (lambda param: lambda: param)(param)
+                k = (submodule_name, param_name)
+                self._underlying[k] = param
+                self._transform[k] = lambda t: t
         for param, memo in shared_param_memo.items():
             submodule, submodule_name, param_name = memo
-            new_p = IndirectTensor((lambda s, p: lambda: self._indirections[(s, p)])(submodule_name, param_name))
+
+            def mk_indirect_parameter(k):
+                return IndirectParameter(
+                    lambda: self._transform[k](self._underlying[k]),
+                    lambda: self._transform[k](self._underlying[k].grad),
+                )
+            new_p = mk_indirect_parameter((submodule_name, param_name))
+
             delattr(submodule, param_name)
             # TODO: make this look like a parameter
             setattr(submodule, param_name, new_p)
@@ -67,12 +85,22 @@ class FlattenParamsWrapper(nn.Module):
                 p.detach().clone(memory_format=torch.contiguous_format).view(-1)
                 for p in params
             ], dim=0)
+            flat_param.requires_grad = True
             self.register_buffer(f"flat_param{i}", flat_param)
             offset = 0
             for p in params:
                 submodule, submodule_name, param_name = shared_param_memo[p]
-                self._indirections[(submodule_name, param_name)] = \
-                    flat_param[offset:offset + p.numel()].view(p.shape)
+                k = (submodule_name, param_name)
+                self._underlying[k] = flat_param
+
+                def mk_transform(offset, numel, shape):
+                    def transform(t):
+                        if t is None:
+                            return t
+                        return t[offset:offset + numel].view(shape)
+                    return transform
+
+                self._transform[k] = mk_transform(offset, p.numel(), p.shape)
                 offset += p.numel()
 
     def forward(self, *args, **kwargs):
@@ -93,3 +121,8 @@ print(model.flat_param0)
 print(type(model._module[0].weight))
 print(model(input))
 print(list(model.named_parameters()))
+
+loss = model(input).sum()
+loss.backward()
+print(model._module[0].weight.grad)
+print(model.flat_param0.grad)
