@@ -93,9 +93,13 @@ class LoggingMode(TorchDispatchMode):
         return rs
 
 
+with LoggingMode():
+    torch.nn.functional.dropout(torch.randn(3), 0.5)
+
+
 class TracerTensorTest(TestCase):
     def test_basic(self):
-        with LoggingMode.push(collect_logs=True) as mode:
+        with LoggingMode(collect_logs=True) as mode:
             x = torch.randn(2, 3, requires_grad=True)
             y = torch.randn(3, 4)
             with torch.autocast('cpu'):
