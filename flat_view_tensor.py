@@ -5,6 +5,7 @@ from torch.nn import Parameter
 from typing import List
 
 # TODO: support tensor methods
+# TODO: use wrapper subclass so we don't leak the original parameter storage
 class IndirectParameter(torch.Tensor):
     def __new__(cls, indir, grad_indir):
         elem = indir()
