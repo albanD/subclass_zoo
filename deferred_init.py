@@ -1,10 +1,7 @@
 import torch
-from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
-from torch.utils._python_dispatch import TorchDispatchMode
-from torch.utils._pytree import tree_map
-from torch.fx.experimental.proxy_tensor import ProxyTensor, PythonKeyTracer, ProxyTorchDispatchMode
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.proxy_tensor import PythonKeyTracer, ProxyTorchDispatchMode
 from torch.fx import Graph, GraphModule
-from dataclasses import dataclass
 
 # Limitations:
 #   - initialization cannot refer to external tensors
@@ -14,6 +11,7 @@ from dataclasses import dataclass
 #     understanding aliasing relationships
 #   - only top level module is rematerialized
 #   - we lose parameter-ness and requires_grad-ness
+#   - no version counter safety to guard against input mutation
 
 def deferred_init(f, *args, **kwargs):
     fx_tracer = PythonKeyTracer()
