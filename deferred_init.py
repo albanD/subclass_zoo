@@ -54,6 +54,8 @@ def materialize_module(m):
     replace_results(m._parameters)
     replace_results(m._buffers)
 
+    del m._deferred
+
 
 m = deferred_init(torch.nn.Linear, 3, 5)
 print(m.weight)
