@@ -1,6 +1,8 @@
 from torch._dispatch.python import enable_python_dispatcher, no_python_dispatcher
 import torch
 
+# TODO: See https://github.com/pytorch/pytorch/issues/88109 for why
+# you have to use BackendSelect here and CUDA doesn't work
 @torch.ops.aten.randn.default.py_impl(torch._C.DispatchKey.BackendSelect)
 def randn(size, device=None, **kwargs):
     with no_python_dispatcher():
