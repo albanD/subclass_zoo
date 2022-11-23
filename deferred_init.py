@@ -19,7 +19,7 @@ def deferred_init(f, *args, **kwargs):
     fx_tracer.root = torch.nn.Module()
     fx_tracer.tensor_attrs = {}
     fake_tensor_mode = FakeTensorMode(allow_fallback_kernels=True)
-    proxy_mode = ProxyTorchDispatchMode(fx_tracer, trace_factory_functions=True)
+    proxy_mode = ProxyTorchDispatchMode(fx_tracer)
     with fake_tensor_mode, proxy_mode:
         r = f(*args, **kwargs)
         r._deferred = fx_tracer

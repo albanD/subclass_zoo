@@ -34,5 +34,5 @@
 
 #       - name: Run test
 #         run: |
-#           pytest ./*.py
+#           python run_test.py
 

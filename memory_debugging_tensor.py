@@ -9,9 +9,9 @@ Original file is located at
 
 import torch
 # Some mode APIs are changing on master while this runs on colab
-print(torch.__version__)
-if not torch.__version__.split("+")[0] == "1.12.1":
-    raise RuntimeError("This notebook is for pytorch 1.12")
+# print(torch.__version__)
+# if not torch.__version__.split("+")[0] == "1.12.1":
+#     raise RuntimeError("This notebook is for pytorch 1.12")
 
 import torch.nn as nn
 import torch.nn.functional as F

@@ -15,8 +15,9 @@ def randn(size, device=None, **kwargs):
 ctx = enable_python_dispatcher()
 ctx.__enter__()
 
-torch.manual_seed(0)
-x = torch.randn(10, device='cpu')
-torch.manual_seed(0)
-y = torch.ops.aten.randn.default([10], device='cuda')
-torch.testing.assert_close(x, y.cpu())
+if torch.cuda.is_available():
+    torch.manual_seed(0)
+    x = torch.randn(10, device='cpu')
+    torch.manual_seed(0)
+    y = torch.ops.aten.randn.default([10], device='cuda')
+    torch.testing.assert_close(x, y.cpu())

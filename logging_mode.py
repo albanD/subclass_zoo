@@ -108,8 +108,8 @@ class TracerTensorTest(TestCase):
         self.assertExpectedInline(
             mode.str_logs(),
             """\
-$0: f32[2, 3] = aten.randn.default([2, 3], dtype=torch.float32, device=cpu, pin_memory=False)
-$1: f32[3, 4] = aten.randn.default([3, 4], dtype=torch.float32, device=cpu, pin_memory=False)
+$0: f32[2, 3] = aten.randn.default([2, 3], device=cpu, pin_memory=False)
+$1: f32[3, 4] = aten.randn.default([3, 4], device=cpu, pin_memory=False)
 $2: bf16[3, 4] = aten._to_copy.default($1, dtype=torch.bfloat16)
 $3: bf16[2, 3] = aten._to_copy.default($0, dtype=torch.bfloat16)
 $4: bf16[2, 4] = aten.mm.default($3, $2)
@@ -119,7 +119,8 @@ $7: bf16[2, 4] = aten.expand.default($6, [2, 4])
 $8: bf16[4, 3] = aten.t.default($2)
 $9: bf16[2, 3] = aten.mm.default($7, $8)
 $10: f32[2, 3] = aten._to_copy.default($9, dtype=torch.float32, layout=torch.strided, device=cpu)
-$11: f32[2, 3] = aten.detach.default($10)""",  # noqa
+$11: f32[2, 3] = aten.detach.default($10)
+$12: f32[2, 3] = aten.detach.default($11)""",  # noqa
         )
 
 if __name__ == "__main__":

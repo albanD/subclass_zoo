@@ -1,5 +1,5 @@
 import torch
-from torch.overrides import enable_torch_function_mode, TorchFunctionMode
+from torch.overrides import TorchFunctionMode
 from torch.utils._pytree import tree_map
 
 import numpy as np
@@ -88,20 +88,19 @@ def detach(super_fn, self):
 # 2. A mode that allows us to override factory functions
 # This needs to be a torch function mode before the arg parser creates a device
 # based on the passed string, so we need to change it before reaching the arg parser
-class MyDeviceMode(torch.Tensor):
+class MyDeviceMode(TorchFunctionMode):
     IMPLEMENTATIONS = {}
 
-    @classmethod
-    def __torch_function__(cls, func, types, args=(), kwargs=None):
+    def __torch_function__(self, func, types, args=(), kwargs=None):
         def super_fn(*args, **kwargs):
             # Disable torch_function by hand because we don't want the wrapping behavior of
             # the super() impl
             with torch._C.DisableTorchFunction():
                 return func(*args, **kwargs)
 
-        if func in cls.IMPLEMENTATIONS:
+        if func in self.IMPLEMENTATIONS:
             try:
-                return cls.IMPLEMENTATIONS[func](super_fn, *args, **kwargs or {})
+                return self.IMPLEMENTATIONS[func](super_fn, *args, **kwargs or {})
             except Exception as e:
                 print(e)
                 raise e
@@ -120,7 +119,7 @@ def implements_factory(func):
 
 def enable_my_device():
     # Globally enable the mode
-    holder = enable_torch_function_mode(MyDeviceMode)
+    holder = MyDeviceMode()
     holder.__enter__()
 
 

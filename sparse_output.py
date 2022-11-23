@@ -1,6 +1,6 @@
 import torch
 from torch.testing._internal.common_utils import run_tests, TestCase
-from torch.utils._python_dispatch import enable_torch_dispatch_mode
+from torch.utils._python_dispatch import TorchDispatchMode
 
 """
 From Christian:
@@ -24,25 +24,20 @@ https://github.com/pytorch/pytorch/issues/8853 .
 """
 
 
-class SparseOutputMode(torch.Tensor):
-    @staticmethod
-    def __new__(cls, elem):
-        raise RuntimeError("this mode mixin cannot actually be instantiated")
-
-    @classmethod
-    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+class SparseOutputMode(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         if func == torch.ops.aten.mul:
             # TODO: this algorithm is probably not what you actually want to do
             # run the multiply
-            r = super().__torch_dispatch__(func, types, args, kwargs)
+            r = func(*args, **kwargs)
             # sparsify it
             return r.to_sparse()
 
-        return super().__torch_dispatch__(func, types, args, kwargs)
+        return func(*args, **kwargs)
 
 
 def sparse_output(func, *args, **kwargs):
-    with enable_torch_dispatch_mode(SparseOutputMode):
+    with SparseOutputMode():
         return func(*args, **kwargs)
 
 

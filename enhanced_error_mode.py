@@ -35,5 +35,6 @@ class EnhancedErrorMode(TorchDispatchMode):
             ex.args = (msg,) + ex.args[1:]
             raise
 
-with EnhancedErrorMode():
-    torch.matmul(torch.randn(3), torch.randn(4, 5))
+if __name__ == "__main__":
+    with EnhancedErrorMode():
+        torch.matmul(torch.randn(3), torch.randn(4, 5))
