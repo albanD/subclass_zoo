@@ -5,4 +5,4 @@ numpy
 sympy
 expecttest
 matplotlib
-xmlrunner
+unittest-xml-reporting
