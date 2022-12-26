@@ -1,7 +1,7 @@
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map
-from torch._subclasses.meta_utils import WeakTensorRefKey
+from torch.utils.weak import WeakIdRef
 from torch.testing._internal.common_utils import run_tests, TestCase
 import torch.overrides
 
@@ -47,7 +47,7 @@ class LoggingMode(TorchDispatchMode):
         self.logs = []
 
     def _shortid(self, t: torch.Tensor) -> int:
-        o = WeakTensorRefKey(t)
+        o = WeakIdRef(t)
         weak_self = weakref.ref(self)
 
         def del_memo():
