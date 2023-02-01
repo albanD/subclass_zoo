@@ -1,7 +1,6 @@
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_map_only
-from utils import no_dispatch
 
 
 # The goal of this mode is to check that two device are consistent
@@ -28,8 +27,7 @@ class ConsistentWithCPUMode(TorchDispatchMode):
 
         # Make sure the output is close enough!
         for orig, cpu in zip(as_tuple(orig_cpu_out), as_tuple(cpu_out)):
-            with no_dispatch():
-                torch.testing.assert_close(orig, cpu)
+            torch.testing.assert_close(orig, cpu)
 
 
         return orig_out
