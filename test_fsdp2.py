@@ -331,5 +331,43 @@ new_out, new_g = do()
 assert (ref_out - new_out).abs().max() < 1e-5, "Buffer sharding + dropping"
 assert (ref_g - new_g).abs().max() < 1e-5, "Buffer sharding + dropping grad"
 
+# Buffer Sharding + Dropping:
+# Sequential(
+#   (0): Linear(in_features=2000, out_features=2000, bias=True)
+#   (1): ReLU()
+#   (2): Linear(in_features=2000, out_features=2000, bias=True)
+#   (3): ReLU()
+#   (4): Linear(in_features=2000, out_features=2000, bias=True)
+#   (5): ReLU()
+# )
+# Current mem at Bef shard: 112
+# Current mem at 0 sharded: 96
+# Current mem at 2 sharded: 80
+# Peak mem ref: 113 -> delta: 33MB
+# Sequential(
+#   (0): ParametrizedLinear(
+#     in_features=2000, out_features=2000, bias=True
+#     (parametrizations): ModuleDict(
+#       (weight): ParametrizationList(
+#         (0): ShardingReparam()
+#         (1): DroppingReparam()
+#       )
+#     )
+#   )
+#   (1): ReLU()
+#   (2): ParametrizedLinear(
+#     in_features=2000, out_features=2000, bias=True
+#     (parametrizations): ModuleDict(
+#       (weight): ParametrizationList(
+#         (0): ShardingReparam()
+#       )
+#     )
+#   )
+#   (3): ReLU()
+#   (4): Linear(in_features=2000, out_features=2000, bias=True)
+#   (5): ReLU()
+# )
+# Peak mem new: 97 -> delta: 17MB
+
 
 
