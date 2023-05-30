@@ -4,11 +4,10 @@ from torch.autograd import Function
 from torch import nn
 from torch.nn.utils.parametrize import register_parametrization
 
-
 ### FSDP PART
 class BucketedTensor(torch.Tensor):
     @staticmethod
-    def __new__(cls, view_tensor, base_tensor):
+    def __new__(cls, view_tensor, base_tensor, idx):
         kwargs = {}
         kwargs["device"] = view_tensor.device
         kwargs["dtype"] = view_tensor.dtype
@@ -16,6 +15,7 @@ class BucketedTensor(torch.Tensor):
         self = torch.Tensor._make_wrapper_subclass(cls, view_tensor.size(), **kwargs)
         self._view_tensor = view_tensor
         self._base_tensor = base_tensor
+        self._idx = idx
         self._all_views = None
         return self
 
@@ -48,18 +48,19 @@ class BucketedTensor(torch.Tensor):
     def from_full_tensor(full_w):
         assert not torch.is_grad_enabled()
         slices = full_w.unbind(dim=-1)
-        all_slices = tuple(BucketedTensor(s, full_w) for s in slices)
+        all_slices = tuple(BucketedTensor(s, full_w, i) for i, s in enumerate(slices))
         for s in all_slices:
             s._all_views = all_slices
         return all_slices
 
 class UnsliceReduceFn(Function):
     @staticmethod
-    def forward(ctx, *all_w):
+    def forward(ctx, rank, *all_w):
         assert all(w._base_tensor is all_w[0]._base_tensor for w in all_w)
         full_local = all_w[0]._base_tensor.detach()
         # Assume everyone is involved
         ctx.idxs = list(range(WORLD_SIZE))
+        ctx.rank = rank
         out = torch.distributed._functional_collectives.all_gather_tensor(full_local, 0, ctx.idxs,"huh")
         return out
 
@@ -68,11 +69,13 @@ class UnsliceReduceFn(Function):
         # gO = td.all_reduce(gO)
         # Should be reduce_scatter but that doesn't work on gloo
         gO = torch.distributed._functional_collectives.all_reduce(gO, "sum", ctx.idxs)
-        return gO.unbind(-1)
+        gO = gO.chunk(WORLD_SIZE)[ctx.rank]
+        return None, *gO.unbind(-1)
 
 class UnsliceReduceGrad(nn.Module):
-    def __init__(self, unslice_state):
+    def __init__(self, rank, unslice_state):
         super().__init__()
+        self.rank = rank
         self.unslice_state = unslice_state
 
     def forward(self, w):
@@ -80,7 +83,7 @@ class UnsliceReduceGrad(nn.Module):
         if len(self.unslice_state) > 0:
             return self.unslice_state[0]
         else:
-            new_full_w = UnsliceReduceFn.apply(*w._all_views)
+            new_full_w = UnsliceReduceFn.apply(self.rank, *w._all_views)
             # Clear the state after the backward call
             def clean_state_hook(_):
                 self.unslice_state.pop()
@@ -119,7 +122,7 @@ def make_fsdp_(mod, rank):
     for i, l in enumerate(mods):
         l.weight = nn.Parameter(new_w[i])
 
-        register_parametrization(l, "weight", UnsliceReduceGrad(unslice_state), unsafe=True)
+        register_parametrization(l, "weight", UnsliceReduceGrad(rank, unslice_state), unsafe=True)
         register_parametrization(l, "weight", Slice(i), unsafe=True)
 
 # ### Quantization part
@@ -165,7 +168,7 @@ import os
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = '12345'
 
     # initialize the process group
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
@@ -180,16 +183,16 @@ def fsdp_main(idx):
         print(f"From {idx}: {txt}")
     setup(idx, WORLD_SIZE)
     torch.manual_seed(idx)
-    inp = torch.rand(4, 2)
-    target = torch.randn(4, 2)
+    inp = torch.rand(4, 2000)
+    target = torch.randn(4, 2000)
 
     torch.manual_seed(42)
     mod = nn.Sequential(
-        nn.Linear(2, 2),
+        nn.Linear(2000, 2000),
         nn.ReLU(),
-        nn.Linear(2, 2),
+        nn.Linear(2000, 2000),
         nn.ReLU(),
-        nn.Linear(2, 2),
+        nn.Linear(2000, 2000),
     )
     crit = torch.nn.MSELoss()
 
@@ -212,10 +215,9 @@ def fsdp_main(idx):
 
         opt.step()
         opt.zero_grad()
-    _print(f"final loss: {l}")
+    _print(f"final weights w[0]: {mod[0].weight.mean()}")
 
     cleanup()
-
 
 if __name__ == "__main__":
     mp.spawn(fsdp_main,
