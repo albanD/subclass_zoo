@@ -28,7 +28,7 @@ import torch
 from torch.testing._internal.common_utils import run_tests
 from bug_zoo import BugZoo
 from empty_tensor import EmptyTensorTest
-from functorch import FunctorchTest
+from functorch_test import FunctorchTest
 from inner_autograd_tensor import InnerAutogradTensorTest
 from logging_mode import TracerTensorTest
 from negative_tensor import NegativeTensorTest
